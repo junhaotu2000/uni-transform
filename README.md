@@ -18,7 +18,7 @@ A high-performance Python library for 3D rigid body transformations, supporting 
 ## Installation
 
 ```bash
-pip install uni-transform
+uv add uni-transform
 ```
 
 ### From Source
@@ -26,13 +26,13 @@ pip install uni-transform
 ```bash
 git clone https://github.com/junhaotu/uni-transform.git
 cd uni-transform
-pip install -e .
+uv pip install -e .
 ```
 
 ### Development Installation
 
 ```bash
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 ```
 
 ## Quick Start
