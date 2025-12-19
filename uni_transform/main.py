@@ -1219,11 +1219,24 @@ class Transform:
     Attributes:
         rotation: Rotation matrix (..., 3, 3)
         translation: Translation vector (..., 3)
+        extra: Optional extra state like gripper width (..., K). Participates in
+               interpolation and distance calculations.
         backend: "numpy" or "torch" (auto-detected from inputs)
+    
+    Example:
+        >>> # With gripper width
+        >>> tf = Transform.from_rep(
+        ...     np.array([1, 2, 3, 0, 0, 0, 1, 0.04]),  # [x,y,z,quat,gripper]
+        ...     from_rep="quat",
+        ...     extra_dims=1,
+        ... )
+        >>> tf.extra  # array([0.04])
+        >>> pose = tf.to_rep("euler")  # [x,y,z,euler,gripper]
     """
     
     rotation: ArrayLike
     translation: ArrayLike
+    extra: ArrayLike = None  # Optional: gripper width, joint states, etc. (..., K)
     backend: Backend = field(init=False)
     
     def __post_init__(self) -> None:
@@ -1231,9 +1244,15 @@ class Transform:
         # Detect backend from inputs
         rot_backend = _get_backend(self.rotation)
         trans_backend = _get_backend(self.translation)
+        extra_backend = _get_backend(self.extra) if self.extra is not None else None
         
-        # Use torch if either input is torch
-        self.backend = "torch" if rot_backend == "torch" or trans_backend == "torch" else "numpy"
+        # Use torch if any input is torch
+        is_torch = (
+            rot_backend == "torch" or 
+            trans_backend == "torch" or 
+            extra_backend == "torch"
+        )
+        self.backend = "torch" if is_torch else "numpy"
         
         # Ensure consistent backend
         if self.backend == "torch":
@@ -1242,6 +1261,12 @@ class Transform:
             if not isinstance(self.translation, torch.Tensor):
                 self.translation = torch.as_tensor(
                     self.translation,
+                    dtype=self.rotation.dtype,
+                    device=self.rotation.device,
+                )
+            if self.extra is not None and not isinstance(self.extra, torch.Tensor):
+                self.extra = torch.as_tensor(
+                    self.extra,
                     dtype=self.rotation.dtype,
                     device=self.rotation.device,
                 )
@@ -1256,11 +1281,13 @@ class Transform:
         backend: Backend = "numpy",
         dtype=None,
         device=None,
+        extra_dims: int = 0,
     ) -> "Transform":
-        """Create identity transform."""
+        """Create identity transform with optional extra dimensions (initialized to zero)."""
         rot = _eye(3, backend, dtype=dtype, device=device)
         trans = _zeros((3,), backend, dtype=dtype, device=device)
-        return cls(rotation=rot, translation=trans)
+        extra = _zeros((extra_dims,), backend, dtype=dtype, device=device) if extra_dims > 0 else None
+        return cls(rotation=rot, translation=trans, extra=extra)
     
     @classmethod
     def from_matrix(cls, matrix: ArrayLike) -> "Transform":
@@ -1279,26 +1306,44 @@ class Transform:
         seq: str = "ZYX",
         degrees: bool = False,
         euler_in_rpy: bool = False,
+        extra_dims: int = 0,
         requires_grad: bool = False,
     ) -> "Transform":
         """
-        Create transform from translation + rotation representation.
+        Create transform from translation + rotation representation + optional extra.
         
         Args:
-            tf: [translation (3), rotation (varies by repr)]
+            tf: [translation (3), rotation (varies by repr), extra (extra_dims)]
             from_rep: Rotation representation
             seq: Euler sequence (if euler)
             degrees: If euler, whether angles are in degrees
             euler_in_rpy: If True and from_rep is euler, input euler is in [r,p,y] order
+            extra_dims: Number of extra dimensions at the end (e.g., 1 for gripper width)
             requires_grad: If True, enable gradient tracking (PyTorch only)
         
         Returns:
-            Transform instance
+            Transform instance with optional extra field
+        
+        Example:
+            >>> # [x, y, z, qx, qy, qz, qw, gripper_width]
+            >>> tf = Transform.from_rep(
+            ...     np.array([1, 2, 3, 0, 0, 0, 1, 0.04]),
+            ...     from_rep="quat",
+            ...     extra_dims=1,
+            ... )
+            >>> tf.extra  # array([0.04])
         """
         from_rep = RotationRepr(from_rep)
         
+        # Extract extra dimensions if specified
+        extra = None
+        if extra_dims > 0:
+            extra = tf[..., -extra_dims:]
+            tf = tf[..., :-extra_dims]
+        
         if from_rep == RotationRepr.MATRIX:
             result = cls.from_matrix(tf)
+            result.extra = extra
             if requires_grad and result.backend == "torch":
                 result.requires_grad_(True)
             return result
@@ -1309,7 +1354,7 @@ class Transform:
             rotation_part, from_rep, seq=seq, degrees=degrees, euler_in_rpy=euler_in_rpy
         )
         
-        result = cls(rotation=rotation, translation=translation)
+        result = cls(rotation=rotation, translation=translation, extra=extra)
         if requires_grad and result.backend == "torch":
             result.requires_grad_(True)
         return result
@@ -1319,6 +1364,7 @@ class Transform:
         cls,
         position: ArrayLike,
         quaternion: ArrayLike,
+        extra: ArrayLike = None,
     ) -> "Transform":
         """
         Create transform from position and quaternion.
@@ -1328,6 +1374,7 @@ class Transform:
         Args:
             position: Translation vector (..., 3)
             quaternion: Quaternion in xyzw format (..., 4)
+            extra: Optional extra state like gripper width (..., K)
         
         Returns:
             Transform instance
@@ -1335,10 +1382,11 @@ class Transform:
         Example:
             >>> pos = np.array([1.0, 2.0, 3.0])
             >>> quat = np.array([0, 0, 0, 1])  # identity
-            >>> tf = Transform.from_pos_quat(pos, quat)
+            >>> gripper = np.array([0.04])
+            >>> tf = Transform.from_pos_quat(pos, quat, extra=gripper)
         """
         rotation = quaternion_to_matrix(quaternion)
-        return cls(rotation=rotation, translation=position)
+        return cls(rotation=rotation, translation=position, extra=extra)
     
     @classmethod
     def stack(cls, transforms: List["Transform"], axis: int = 0) -> "Transform":
@@ -1350,7 +1398,7 @@ class Transform:
             axis: Axis along which to stack (default: 0)
         
         Returns:
-            Batched Transform
+            Batched Transform (extra is stacked if all transforms have extra)
         
         Example:
             >>> tf1 = Transform.identity()
@@ -1362,14 +1410,23 @@ class Transform:
         
         backend = transforms[0].backend
         
+        # Check if all transforms have extra
+        all_have_extra = all(tf.extra is not None for tf in transforms)
+        
         if backend == "numpy":
             rotation = np.stack([tf.rotation for tf in transforms], axis=axis)
             translation = np.stack([tf.translation for tf in transforms], axis=axis)
+            extra = None
+            if all_have_extra:
+                extra = np.stack([tf.extra for tf in transforms], axis=axis)
         else:
             rotation = torch.stack([tf.rotation for tf in transforms], dim=axis)
             translation = torch.stack([tf.translation for tf in transforms], dim=axis)
+            extra = None
+            if all_have_extra:
+                extra = torch.stack([tf.extra for tf in transforms], dim=axis)
         
-        return cls(rotation=rotation, translation=translation)
+        return cls(rotation=rotation, translation=translation, extra=extra)
     
     # -------------------------------------------------------------------------
     # Conversion Methods
@@ -1400,28 +1457,41 @@ class Transform:
         seq: str = "ZYX",
         degrees: bool = False,
         euler_in_rpy: bool = False,
+        include_extra: bool = True,
     ) -> ArrayLike:
         """
-        Convert to [translation, rotation] in specified representation.
+        Convert to [translation, rotation, extra] in specified representation.
         
         Args:
             to_rep: Target rotation representation
             seq: Euler sequence (if euler)
             degrees: If euler, whether to return degrees
             euler_in_rpy: If True and to_rep is euler, output is in [r,p,y] order
+            include_extra: If True and extra exists, append extra to output
         
         Returns:
-            Array of [translation (3), rotation (varies)]
+            Array of [translation (3), rotation (varies), extra (K if exists)]
+        
+        Example:
+            >>> tf = Transform.from_rep([1,2,3,0,0,0,1,0.04], from_rep="quat", extra_dims=1)
+            >>> tf.to_rep("euler")  # [x, y, z, euler(3), gripper(1)]
         """
         to_rep = RotationRepr(to_rep)
         
         if to_rep == RotationRepr.MATRIX:
+            # Note: Matrix representation returns 4x4, extra not concatenated
             return self.as_matrix()
         
         rotation_repr = matrix_to_rotation(
             self.rotation, to_rep, seq=seq, degrees=degrees, euler_in_rpy=euler_in_rpy
         )
-        return _cat([self.translation, rotation_repr], dim=-1)
+        result = _cat([self.translation, rotation_repr], dim=-1)
+        
+        # Append extra if exists
+        if include_extra and self.extra is not None:
+            result = _cat([result, self.extra], dim=-1)
+        
+        return result
     
     # -------------------------------------------------------------------------
     # Transform Operations
@@ -1432,6 +1502,11 @@ class Transform:
         Compose transforms: self @ other.
         
         The result transforms points as: self.transform(other.transform(point))
+        
+        Note:
+            Extra from `other` is preserved in the result (the "inner" transform's state).
+            This is useful for robot control where you apply a world-frame delta to a pose
+            and want to keep the pose's gripper state.
         """
         if self.backend != other.backend:
             raise ValueError(
@@ -1445,17 +1520,21 @@ class Transform:
             + self.translation
         )
         
-        return Transform(rotation=rotation, translation=translation)
+        # Use other's extra (the "inner" transform's state)
+        # This is the common case: delta @ pose -> keep pose's gripper state
+        extra = other.extra if other.extra is not None else self.extra
+        
+        return Transform(rotation=rotation, translation=translation, extra=extra)
     
     def compose(self, other: "Transform") -> "Transform":
         """Alias for @ operator."""
         return self @ other
     
     def inverse(self) -> "Transform":
-        """Compute inverse transform."""
+        """Compute inverse transform (extra is preserved)."""
         rot_inv = _transpose_last_two(self.rotation)
         trans_inv = -_matmul(rot_inv, self.translation[..., None]).squeeze(-1)
-        return Transform(rotation=rot_inv, translation=trans_inv)
+        return Transform(rotation=rot_inv, translation=trans_inv, extra=self.extra)
     
     def transform_point(self, point: ArrayLike) -> ArrayLike:
         """Apply transform to point(s)."""
@@ -1516,8 +1595,8 @@ class Transform:
     
     @property
     def shape(self) -> Tuple[int, ...]:
-        """Get shape (alias for batch_shape, for consistency with tensor API)."""
-        return self.rotation.shape
+        """Get shape."""
+        return self.translation.shape, self.rotation.shape
     
     @property
     def is_batched(self) -> bool:
@@ -1544,19 +1623,27 @@ class Transform:
         return self.rotation.dtype
     
     @property
+    def extra_dims(self) -> int:
+        """Get number of extra dimensions (0 if no extra)."""
+        if self.extra is None:
+            return 0
+        return self.extra.shape[-1] if self.extra.ndim > 0 else 1
+    
+    @property
     def requires_grad(self) -> bool:
         """Check if gradients are enabled (PyTorch only)."""
         if self.backend == "torch":
-            return self.rotation.requires_grad or self.translation.requires_grad
+            extra_grad = self.extra.requires_grad if self.extra is not None else False
+            return self.rotation.requires_grad or self.translation.requires_grad or extra_grad
         return False
     
     def requires_grad_(self, requires_grad: bool = True) -> "Transform":
         """
         Enable/disable gradient tracking in-place (PyTorch only).
-        
+
         Args:
             requires_grad: Whether to track gradients
-        
+
         Returns:
             self (for chaining)
         """
@@ -1564,6 +1651,8 @@ class Transform:
             raise ValueError("requires_grad_() is only supported for PyTorch tensors")
         self.rotation.requires_grad_(requires_grad)
         self.translation.requires_grad_(requires_grad)
+        if self.extra is not None:
+            self.extra.requires_grad_(requires_grad)
         return self
     
     # -------------------------------------------------------------------------
@@ -1586,7 +1675,8 @@ class Transform:
         
         rot = self.rotation.to(device=device, dtype=dtype)
         trans = self.translation.to(device=device, dtype=dtype)
-        return Transform(rotation=rot, translation=trans)
+        extra = self.extra.to(device=device, dtype=dtype) if self.extra is not None else None
+        return Transform(rotation=rot, translation=trans, extra=extra)
     
     def detach(self) -> "Transform":
         """Detach from computation graph (PyTorch only)."""
@@ -1595,6 +1685,7 @@ class Transform:
         return Transform(
             rotation=self.rotation.detach(),
             translation=self.translation.detach(),
+            extra=self.extra.detach() if self.extra is not None else None,
         )
     
     def clone(self) -> "Transform":
@@ -1603,17 +1694,23 @@ class Transform:
             return Transform(
                 rotation=self.rotation.clone(),
                 translation=self.translation.clone(),
+                extra=self.extra.clone() if self.extra is not None else None,
             )
         return Transform(
             rotation=self.rotation.copy(),
             translation=self.translation.copy(),
+            extra=self.extra.copy() if self.extra is not None else None,
         )
     
     def __repr__(self) -> str:
         """String representation."""
+        extra_info = ""
+        if self.extra is not None:
+            extra_shape = self.extra.shape[-1] if self.extra.ndim > 0 else 1
+            extra_info = f", extra_dims={extra_shape}"
         return (
             f"Transform(backend={self.backend}, "
-            f"batch_shape={self.batch_shape}, "
+            f"batch_shape={self.batch_shape}{extra_info}, "
             f"dtype={self.dtype})"
         )
     
@@ -1622,6 +1719,7 @@ class Transform:
         return Transform(
             rotation=self.rotation[idx],
             translation=self.translation[idx],
+            extra=self.extra[idx] if self.extra is not None else None,
         )
     
     # -------------------------------------------------------------------------
@@ -1714,9 +1812,12 @@ def quaternion_slerp(
         theta = np.arccos(dot)
         sin_theta = np.sin(theta)
         
-        # Handle t broadcasting
+        # Handle t broadcasting: when t is 1D (N,) and q0 is 1D (4,),
+        # we want output shape (N, 4), so t should become (N, 1)
         if np.ndim(t) == 0 or (np.ndim(t) == 1 and t.shape[0] == 1):
             t = np.broadcast_to(t, q0.shape[:-1] + (1,))
+        elif t.ndim == 1 and q0.ndim == 1:
+            t = np.expand_dims(t, axis=-1)  # (N,) -> (N, 1)
         elif t.ndim < q0.ndim:
             t = np.expand_dims(t, axis=-1)
         
@@ -1746,9 +1847,13 @@ def quaternion_slerp(
     if not isinstance(t, torch.Tensor):
         t = torch.tensor(t, dtype=q0.dtype, device=q0.device)
     
-    # Ensure t has right shape for broadcasting
-    while t.ndim < q0.ndim:
-        t = t.unsqueeze(-1)
+    # Handle broadcasting: when t is 1D (N,) and q0 is 1D (4,),
+    # we want output shape (N, 4), so t should become (N, 1)
+    if t.ndim == 1 and q0.ndim == 1:
+        t = t.unsqueeze(-1)  # (N,) -> (N, 1)
+    else:
+        while t.ndim < q0.ndim:
+            t = t.unsqueeze(-1)
     
     # Normalize quaternions
     q0 = q0 / torch.norm(q0, dim=-1, keepdim=True)
@@ -1822,9 +1927,12 @@ def quaternion_nlerp(
         q1 = np.asarray(q1)
         t = np.asarray(t)
         
-        # Handle t broadcasting
+        # Handle t broadcasting: when t is 1D (N,) and q0 is 1D (4,),
+        # we want output shape (N, 4), so t should become (N, 1)
         if t.ndim == 0 or (t.ndim == 1 and t.shape[0] == 1):
             t = np.broadcast_to(t, q0.shape[:-1] + (1,))
+        elif t.ndim == 1 and q0.ndim == 1:
+            t = np.expand_dims(t, axis=-1)  # (N,) -> (N, 1)
         elif t.ndim < q0.ndim:
             t = np.expand_dims(t, axis=-1)
         
@@ -1842,8 +1950,13 @@ def quaternion_nlerp(
     if not isinstance(t, torch.Tensor):
         t = torch.tensor(t, dtype=q0.dtype, device=q0.device)
     
-    while t.ndim < q0.ndim:
-        t = t.unsqueeze(-1)
+    # Handle broadcasting: when t is 1D (N,) and q0 is 1D (4,),
+    # we want output shape (N, 4), so t should become (N, 1)
+    if t.ndim == 1 and q0.ndim == 1:
+        t = t.unsqueeze(-1)  # (N,) -> (N, 1)
+    else:
+        while t.ndim < q0.ndim:
+            t = t.unsqueeze(-1)
     
     # Take shorter path
     dot = (q0 * q1).sum(dim=-1, keepdim=True)
@@ -1865,8 +1978,8 @@ def transform_interpolate(
     """
     Interpolate between two transforms.
     
-    Uses linear interpolation for translation and spherical interpolation
-    for rotation (via quaternions).
+    Uses linear interpolation for translation and extra (e.g., gripper width),
+    and spherical interpolation for rotation (via quaternions).
     
     Args:
         tf0: Start transform
@@ -1875,12 +1988,13 @@ def transform_interpolate(
         rotation_method: "slerp" (accurate) or "nlerp" (fast)
     
     Returns:
-        Interpolated Transform
+        Interpolated Transform (including interpolated extra if both have extra)
     
     Example:
-        >>> tf0 = Transform.identity()
-        >>> tf1 = Transform.from_rep(np.array([1, 0, 0, 0, 0, np.pi/2]), from_rep="euler")
+        >>> tf0 = Transform.from_rep([0,0,0,0,0,0,1,0.08], from_rep="quat", extra_dims=1)
+        >>> tf1 = Transform.from_rep([1,0,0,0,0,0,1,0.00], from_rep="quat", extra_dims=1)
         >>> tf_mid = transform_interpolate(tf0, tf1, 0.5)
+        >>> tf_mid.extra  # [0.04] - gripper interpolated
     """
     if tf0.backend != tf1.backend:
         raise ValueError(
@@ -1890,21 +2004,40 @@ def transform_interpolate(
     
     backend = tf0.backend
     
-    # Convert t to appropriate type
+    # Convert t to appropriate type and handle broadcasting
+    # When t is array-like (e.g., shape (N,)), we want output shape (N, 3) for translation
+    # So t_trans needs shape (N, 1) to broadcast with translation shape (3,)
     if backend == "torch":
         if not isinstance(t, torch.Tensor):
             t = torch.tensor(t, dtype=tf0.rotation.dtype, device=tf0.rotation.device)
         t_trans = t
-        while t_trans.ndim < tf0.translation.ndim:
-            t_trans = t_trans.unsqueeze(-1)
+        # If t is 1D and translation is 1D, add dimension for broadcasting
+        if t_trans.ndim == 1 and tf0.translation.ndim == 1:
+            t_trans = t_trans.unsqueeze(-1)  # (N,) -> (N, 1)
+        else:
+            while t_trans.ndim < tf0.translation.ndim:
+                t_trans = t_trans.unsqueeze(-1)
     else:
         t = np.asarray(t)
         t_trans = t
-        if t_trans.ndim < tf0.translation.ndim:
+        # If t is 1D and translation is 1D, add dimension for broadcasting
+        if t_trans.ndim == 1 and tf0.translation.ndim == 1:
+            t_trans = np.expand_dims(t_trans, axis=-1)  # (N,) -> (N, 1)
+        elif t_trans.ndim < tf0.translation.ndim:
             t_trans = np.expand_dims(t, axis=-1)
     
     # Linear interpolation for translation
     translation = (1 - t_trans) * tf0.translation + t_trans * tf1.translation
+    
+    # Linear interpolation for extra (e.g., gripper width)
+    extra = None
+    if tf0.extra is not None and tf1.extra is not None:
+        # Use same t_trans broadcasting for extra
+        extra = (1 - t_trans) * tf0.extra + t_trans * tf1.extra
+    elif tf0.extra is not None:
+        extra = tf0.extra
+    elif tf1.extra is not None:
+        extra = tf1.extra
     
     # Convert rotation matrices to quaternions
     q0 = matrix_to_quaternion(tf0.rotation)
@@ -1921,7 +2054,7 @@ def transform_interpolate(
     # Convert back to rotation matrix
     rotation = quaternion_to_matrix(q_interp)
     
-    return Transform(rotation=rotation, translation=translation)
+    return Transform(rotation=rotation, translation=translation, extra=extra)
 
 
 def transform_sequence_interpolate(
@@ -1943,14 +2076,16 @@ def transform_sequence_interpolate(
                     If False (default), clamp to boundary transforms.
     
     Returns:
-        Transform with batch dimension (M, ...)
+        Transform with batch dimension (M, ...) including interpolated extra
     
     Example:
-        >>> traj = torch.randn(100, 9)  # 100 keyframes
-        >>> tfs = Transform.from_rep(traj, from_rep="rotation_6d")
+        >>> # 100 keyframes with gripper: [x,y,z,rot6d(6),gripper(1)] = 10 dims
+        >>> traj = torch.randn(100, 10)
+        >>> tfs = Transform.from_rep(traj, from_rep="rotation_6d", extra_dims=1)
         >>> times = torch.linspace(0, 1, 100)
         >>> query = torch.linspace(0, 1, 1000)
         >>> result = transform_sequence_interpolate(tfs, times, query)
+        >>> result.extra.shape  # (1000, 1) - gripper also interpolated
     """
     # Get number of keyframes from first batch dimension
     n_keyframes = transforms.rotation.shape[0]
@@ -1964,6 +2099,7 @@ def transform_sequence_interpolate(
     # Get rotations and translations directly from batched transform
     all_rot = transforms.rotation  # (N, 3, 3)
     all_trans = transforms.translation  # (N, 3)
+    all_extra = transforms.extra  # (N, K) or None
     
     if backend == "numpy":
         times = np.asarray(times)
@@ -1996,6 +2132,13 @@ def transform_sequence_interpolate(
         # Interpolate translations
         alpha_trans = alpha[:, np.newaxis]  # (M, 1)
         translation = (1 - alpha_trans) * trans0 + alpha_trans * trans1  # (M, 3)
+        
+        # Interpolate extra (e.g., gripper width)
+        extra = None
+        if all_extra is not None:
+            extra0 = all_extra[indices]  # (M, K)
+            extra1 = all_extra[indices + 1]  # (M, K)
+            extra = (1 - alpha_trans) * extra0 + alpha_trans * extra1  # (M, K)
         
         # Interpolate rotations
         if rotation_method == "slerp":
@@ -2040,6 +2183,13 @@ def transform_sequence_interpolate(
         alpha_trans = alpha.unsqueeze(-1)  # (M, 1)
         translation = (1 - alpha_trans) * trans0 + alpha_trans * trans1  # (M, 3)
         
+        # Interpolate extra (e.g., gripper width)
+        extra = None
+        if all_extra is not None:
+            extra0 = all_extra[indices]  # (M, K)
+            extra1 = all_extra[indices + 1]  # (M, K)
+            extra = (1 - alpha_trans) * extra0 + alpha_trans * extra1  # (M, K)
+        
         # Interpolate rotations
         if rotation_method == "slerp":
             q_interp = quaternion_slerp(q0, q1, alpha)
@@ -2048,7 +2198,7 @@ def transform_sequence_interpolate(
         
         rotation = quaternion_to_matrix(q_interp)  # (M, 3, 3)
     
-    return Transform(rotation=rotation, translation=translation)
+    return Transform(rotation=rotation, translation=translation, extra=extra)
 
 
 # =============================================================================
@@ -2373,8 +2523,9 @@ def transform_distance(
     reduce: Literal[True] = ...,
     rotation_weight: float = ...,
     translation_weight: float = ...,
+    extra_weight: float = ...,
     degrees: bool = ...,
-) -> Tuple[float, float, float]: ...
+) -> Tuple[float, float, float, float]: ...
 @overload
 def transform_distance(
     tf1: Transform,
@@ -2382,8 +2533,9 @@ def transform_distance(
     reduce: Literal[False] = ...,
     rotation_weight: float = ...,
     translation_weight: float = ...,
+    extra_weight: float = ...,
     degrees: bool = ...,
-) -> Tuple[ArrayLike, ArrayLike, ArrayLike]: ...
+) -> Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike]: ...
 
 
 def transform_distance(
@@ -2392,10 +2544,11 @@ def transform_distance(
     reduce: bool = True,
     rotation_weight: float = 1.0,
     translation_weight: float = 1.0,
+    extra_weight: float = 1.0,
     degrees: bool = False,
-) -> Union[float, ArrayLike, Tuple[ArrayLike, ArrayLike, ArrayLike]]:
+) -> Union[Tuple[float, float, float, float], Tuple[ArrayLike, ArrayLike, ArrayLike, ArrayLike]]:
     """
-    Compute distance between transforms (rotation + translation).
+    Compute distance between transforms (rotation + translation + extra).
     
     Args:
         tf1: First transform
@@ -2403,32 +2556,66 @@ def transform_distance(
         reduce: If True, return mean distances as floats
         rotation_weight: Weight for rotation loss in total
         translation_weight: Weight for translation loss in total
+        extra_weight: Weight for extra loss in total (e.g., gripper width)
         degrees: If True, return rotation angle in degrees
     
     Returns:
-        If reduce=True: tuple of (total_loss, rotation_loss, translation_loss) as floats
-        If reduce=False: tuple of (total_loss, rotation_loss, translation_loss) as arrays
+        Tuple of (total_loss, rotation_loss, translation_loss, extra_loss)
+        If reduce=True: all as floats
+        If reduce=False: all as arrays
+        Note: extra_loss is 0.0 if neither transform has extra
     
     Example:
-        >>> pred = Transform.from_rep(pred_traj, from_rep="rotation_6d")
-        >>> target = Transform.from_rep(target_traj, from_rep="rotation_6d")
-        >>> total, rot_loss, trans_loss = transform_distance(pred, target)
+        >>> pred = Transform.from_rep(pred_traj, from_rep="rotation_6d", extra_dims=1)
+        >>> target = Transform.from_rep(target_traj, from_rep="rotation_6d", extra_dims=1)
+        >>> total, rot_loss, trans_loss, extra_loss = transform_distance(pred, target)
     """
     rot_dist = geodesic_distance(tf1.rotation, tf2.rotation, reduce=False, degrees=degrees)
     trans_dist = translation_distance(tf1.translation, tf2.translation, reduce=False)
     
     backend = tf1.backend
     
-    if backend == "torch":
-        total = rotation_weight * rot_dist + translation_weight * trans_dist
-        if reduce:
-            return total.mean().item(), rot_dist.mean().item(), trans_dist.mean().item()
-        return total, rot_dist, trans_dist
+    # Compute extra distance if both have extra
+    if tf1.extra is not None and tf2.extra is not None:
+        if backend == "torch":
+            extra_dist = torch.norm(tf1.extra - tf2.extra, dim=-1)
+        else:
+            extra_dist = np.linalg.norm(tf1.extra - tf2.extra, axis=-1)
+    else:
+        # No extra, use zero
+        if backend == "torch":
+            extra_dist = torch.zeros_like(rot_dist)
+        else:
+            extra_dist = np.zeros_like(rot_dist)
     
-    total = rotation_weight * rot_dist + translation_weight * trans_dist
+    if backend == "torch":
+        total = (
+            rotation_weight * rot_dist + 
+            translation_weight * trans_dist + 
+            extra_weight * extra_dist
+        )
+        if reduce:
+            return (
+                total.mean().item(), 
+                rot_dist.mean().item(), 
+                trans_dist.mean().item(),
+                extra_dist.mean().item(),
+            )
+        return total, rot_dist, trans_dist, extra_dist
+    
+    total = (
+        rotation_weight * rot_dist + 
+        translation_weight * trans_dist + 
+        extra_weight * extra_dist
+    )
     if reduce:
-        return float(np.mean(total)), float(np.mean(rot_dist)), float(np.mean(trans_dist))
-    return total, rot_dist, trans_dist
+        return (
+            float(np.mean(total)), 
+            float(np.mean(rot_dist)), 
+            float(np.mean(trans_dist)),
+            float(np.mean(extra_dist)),
+        )
+    return total, rot_dist, trans_dist, extra_dist
 
 
 @overload
