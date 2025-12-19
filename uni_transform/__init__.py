@@ -7,18 +7,23 @@ A high-performance library for 3D rigid body transformations with:
 - Full PyTorch gradient support for differentiable robotics
 - Arbitrary batch dimension support
 
-Example:
-    >>> import numpy as np
-    >>> from uni_transform import Transform, convert_rotation
-    >>> 
-    >>> # Create transform from euler angles
-    >>> tf = Transform.from_rep(
-    ...     np.array([1.0, 2.0, 3.0, 0.1, 0.2, 0.3]),
-    ...     from_rep="euler"
-    ... )
-    >>> 
-    >>> # Convert to quaternion representation
+API Styles
+----------
+Two styles for rotation conversions:
+
+1. Direct Functions - for fixed, known conversions (type-safe, fast):
+    >>> matrix = quaternion_to_matrix(quat)
+    >>> euler = matrix_to_euler(matrix, seq="ZYX")
+
+2. Generic Functions - for dynamic/configurable conversions:
+    >>> matrix = convert_rotation(data, from_rep="quat", to_rep="matrix")
+    >>> euler = convert_rotation(data, from_rep=config["input_format"], to_rep="euler")
+
+3. Transform Class - for full poses (rotation + translation):
+    >>> tf = Transform.from_rep(np.array([x, y, z, r, p, y]), from_rep="euler")
     >>> quat_rep = tf.to_rep("quat")  # [x, y, z, qx, qy, qz, qw]
+
+See README.md for detailed guidance on when to use each style.
 """
 
 __version__ = "0.1.0"

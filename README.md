@@ -83,6 +83,12 @@ loss.backward()
 
 ### Rotation Conversions
 
+The library provides **two API styles** for rotation conversions, each suited to different use cases:
+
+#### Style 1: Direct Functions (Recommended for Fixed Conversions)
+
+Use when you know the exact conversion path at coding time. Benefits: type-safe, zero runtime overhead, clear function signatures.
+
 ```python
 from uni_transform import (
     quaternion_to_matrix,
@@ -90,17 +96,43 @@ from uni_transform import (
     euler_to_matrix,
     matrix_to_euler,
     rotvec_to_matrix,
-    convert_rotation,
+    rotation_6d_to_matrix,
 )
 
-# Direct conversions
+# Direct, type-safe conversions
 quat = np.array([0, 0, 0.707, 0.707])  # xyzw format, 90° around Z
 matrix = quaternion_to_matrix(quat)
-
-# Generic conversion function
-euler = convert_rotation(quat, from_rep="quat", to_rep="euler", seq="ZYX")
-rot6d = convert_rotation(matrix, from_rep="matrix", to_rep="rotation_6d")
+euler = matrix_to_euler(matrix, seq="ZYX")
+rot6d = matrix_to_rotation_6d(matrix)
 ```
+
+#### Style 2: Generic Functions (Recommended for Dynamic Conversions)
+
+Use when the conversion type is determined at runtime (e.g., configurable pipelines). Benefits: flexible, fewer function imports.
+
+```python
+from uni_transform import convert_rotation, rotation_to_matrix, matrix_to_rotation
+
+# Convert with runtime-determined representations
+input_format = config.get("rotation_format")  # e.g., "quat", "euler"
+output_format = "matrix"
+
+matrix = convert_rotation(rotation_data, from_rep=input_format, to_rep=output_format)
+
+# Or step-by-step via matrix as intermediate
+matrix = rotation_to_matrix(rotation_data, from_rep=input_format)
+result = matrix_to_rotation(matrix, to_rep=output_format)
+```
+
+#### When to Use Which?
+
+| Scenario | Recommended Style |
+|----------|-------------------|
+| Fixed pipeline (e.g., always quat→matrix) | Direct functions |
+| Neural network training loop | Direct functions (performance) |
+| Config-driven conversion | Generic `convert_rotation` |
+| Supporting multiple input formats | Generic `rotation_to_matrix` |
+| One-off scripts | Either (personal preference) |
 
 ### Quaternion Operations
 
@@ -192,7 +224,12 @@ transform_recovered = se3_exp(twist)
 - `orthogonalize_rotation(matrix)` - Project to SO(3) via SVD
 - `se3_log(transform)` / `se3_exp(twist)` - SE(3) Lie group operations
 
-### Transform Class Methods
+### Transform Class
+
+The `Transform` class provides an **object-oriented API** for rigid body transforms (rotation + translation). Use it when you need to:
+- Compose multiple transforms
+- Apply transforms to points/vectors
+- Work with complete SE(3) poses
 
 ```python
 # Factory methods
@@ -214,6 +251,15 @@ tf.clone()                  # Deep copy
 tf.to(device="cuda")        # Move to device (PyTorch)
 tf.requires_grad_(True)     # Enable gradients (PyTorch)
 ```
+
+#### Transform vs Direct Functions
+
+| Task | Transform Class | Direct Functions |
+|------|-----------------|------------------|
+| Rotation-only conversion | Overkill | ✅ Use `quaternion_to_matrix()` etc. |
+| Pose with position + rotation | ✅ `Transform.from_rep()` | Manual concatenation |
+| Composing transforms | ✅ `tf1 @ tf2` | Manual matrix multiply |
+| Transforming points | ✅ `tf.transform_point()` | Manual `R @ p + t` |
 
 ## Conventions
 

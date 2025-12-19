@@ -1,35 +1,41 @@
 """
 Unified transform utilities supporting both NumPy and PyTorch backends.
 
-Usage
------
-NumPy:
-    from uni_transform import Transform, convert_rotation
-    tf_np = Transform.from_rep(
-        np.array([0.1, 0.2, 0.3, 0.0, 0.1, 0.2]),
-        from_rep="euler",
-        seq="XYZ",
-    )
-    quat_np = tf_np.to_rep("quat")  # xyzw
+API Styles
+----------
+This library provides two API styles for rotation conversions:
 
-PyTorch:
-    euler_t = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32)
-    rot_mtx_t = convert_rotation(euler_t, from_rep="euler", to_rep="matrix", seq="XYZ")
-    tf_t = Transform.from_rep(
-        torch.cat([torch.tensor([1.0, 0.0, 0.0]), euler_t]),
+1. Direct Functions (recommended for fixed conversions):
+   - Type-safe, zero runtime overhead, clear signatures
+   - Examples: quaternion_to_matrix(), euler_to_matrix(), matrix_to_rotvec()
+
+2. Generic Functions (recommended for dynamic/configurable conversions):
+   - Flexible, representation determined at runtime
+   - Examples: convert_rotation(), rotation_to_matrix(), matrix_to_rotation()
+
+For full poses (rotation + translation), use the Transform class.
+
+Usage Examples
+--------------
+Direct rotation conversion (fixed path):
+    matrix = quaternion_to_matrix(quat)
+    euler = matrix_to_euler(matrix, seq="ZYX")
+
+Generic rotation conversion (dynamic path):
+    matrix = convert_rotation(rotation, from_rep=input_format, to_rep="matrix")
+
+Transform class (for poses):
+    tf = Transform.from_rep(
+        np.array([x, y, z, roll, pitch, yaw]),
         from_rep="euler",
-        seq="XYZ",
+        seq="ZYX",
     )
-    rot6d_t = tf_t.to_rep("rotation_6d")
+    quat_rep = tf.to_rep("quat")  # [x, y, z, qx, qy, qz, qw]
 
 Batch Operations:
     # All functions support arbitrary batch dimensions
     batch_quats = torch.randn(100, 4)  # (batch, 4)
     batch_matrices = quaternion_to_matrix(batch_quats)  # (batch, 3, 3)
-    
-    # Multi-dimensional batches
-    seq_quats = torch.randn(10, 50, 4)  # (time, batch, 4)
-    seq_matrices = quaternion_to_matrix(seq_quats)  # (time, batch, 3, 3)
 
 Differentiable Operations:
     # Most PyTorch operations support gradients
