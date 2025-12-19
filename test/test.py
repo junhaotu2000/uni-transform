@@ -61,6 +61,8 @@ from uni_transform import (
     se3_exp,
     # Utilities
     geodesic_distance,
+    translation_distance,
+    transform_distance,
     orthogonalize_rotation,
 )
 
@@ -547,12 +549,14 @@ class TestInterpolation:
 
     def test_transform_sequence_interpolate(self):
         """Sequence interpolation should work correctly."""
-        # Create keyframes
-        tf0 = Transform.identity(backend="numpy")
-        tf1 = Transform.from_rep(np.array([1, 0, 0, 0, 0, 0]), from_rep="euler")
-        tf2 = Transform.from_rep(np.array([2, 0, 0, 0, 0, 0]), from_rep="euler")
+        # Create batched keyframes
+        keyframes = np.array([
+            [0, 0, 0, 0, 0, 0],  # tf0: origin
+            [1, 0, 0, 0, 0, 0],  # tf1: x=1
+            [2, 0, 0, 0, 0, 0],  # tf2: x=2
+        ])
+        transforms = Transform.from_rep(keyframes, from_rep="euler")
         
-        transforms = [tf0, tf1, tf2]
         times = np.array([0.0, 1.0, 2.0])
         query_times = np.array([0.5, 1.5])
         
@@ -824,6 +828,229 @@ class TestUtilities:
             np.testing.assert_allclose(
                 R_ortho[i] @ R_ortho[i].T, np.eye(3), rtol=1e-5, atol=1e-6
             )
+
+
+# =============================================================================
+# Test: Distance Functions
+# =============================================================================
+
+
+class TestDistanceFunctions:
+    """Tests for translation_distance and transform_distance functions."""
+
+    def test_translation_distance_zero(self):
+        """Distance between identical translations should be zero."""
+        t = np.array([1.0, 2.0, 3.0])
+        dist = translation_distance(t, t)
+        assert abs(dist) < 1e-6
+
+    def test_translation_distance_l2(self):
+        """L2 distance should be Euclidean distance."""
+        t1 = np.array([0.0, 0.0, 0.0])
+        t2 = np.array([3.0, 4.0, 0.0])
+        
+        dist = translation_distance(t1, t2, p=2.0)
+        np.testing.assert_allclose(dist, 5.0, rtol=1e-6)
+
+    def test_translation_distance_l1(self):
+        """L1 distance should be Manhattan distance."""
+        t1 = np.array([0.0, 0.0, 0.0])
+        t2 = np.array([3.0, 4.0, 5.0])
+        
+        dist = translation_distance(t1, t2, p=1.0)
+        np.testing.assert_allclose(dist, 12.0, rtol=1e-6)
+
+    def test_translation_distance_batched(self):
+        """Translation distance should work with batches."""
+        t1 = np.random.randn(10, 3)
+        t2 = np.random.randn(10, 3)
+        
+        dist = translation_distance(t1, t2, reduce=False)
+        
+        assert dist.shape == (10,)
+
+    def test_translation_distance_reduce(self):
+        """Reduce=True should return mean distance as float."""
+        t1 = np.random.randn(10, 3)
+        t2 = np.random.randn(10, 3)
+        
+        dist_reduced = translation_distance(t1, t2, reduce=True)
+        dist_unreduced = translation_distance(t1, t2, reduce=False)
+        
+        assert isinstance(dist_reduced, float)
+        np.testing.assert_allclose(dist_reduced, np.mean(dist_unreduced), rtol=1e-6)
+
+    def test_translation_distance_torch(self):
+        """Translation distance should work with PyTorch tensors."""
+        t1 = torch.randn(10, 3)
+        t2 = torch.randn(10, 3)
+        
+        dist = translation_distance(t1, t2, reduce=False)
+        
+        assert isinstance(dist, torch.Tensor)
+        assert dist.shape == (10,)
+
+    def test_translation_distance_torch_gradient(self):
+        """Gradients should flow through translation distance."""
+        t1 = torch.randn(10, 3, requires_grad=True)
+        t2 = torch.randn(10, 3)
+        
+        dist = translation_distance(t1, t2, reduce=False)
+        loss = dist.mean()
+        loss.backward()
+        
+        assert t1.grad is not None
+        assert not torch.isnan(t1.grad).any()
+
+    def test_translation_distance_numpy_torch_consistency(self):
+        """NumPy and PyTorch should give consistent results."""
+        t1_np = np.random.randn(10, 3)
+        t2_np = np.random.randn(10, 3)
+        t1_torch = torch.from_numpy(t1_np).float()
+        t2_torch = torch.from_numpy(t2_np).float()
+        
+        dist_np = translation_distance(t1_np, t2_np, reduce=False)
+        dist_torch = translation_distance(t1_torch, t2_torch, reduce=False).numpy()
+        
+        np.testing.assert_allclose(dist_np, dist_torch, rtol=1e-5, atol=1e-6)
+
+    def test_transform_distance_zero(self):
+        """Distance between identical transforms should be zero."""
+        tf = Transform.from_rep(np.array([1, 2, 3, 0.1, 0.2, 0.3]), from_rep="euler")
+        
+        total, rot, trans = transform_distance(tf, tf)
+        
+        assert abs(total) < 1e-6
+        assert abs(rot) < 1e-6
+        assert abs(trans) < 1e-6
+
+    def test_transform_distance_pure_translation(self):
+        """Transform distance for pure translation should only have translation component."""
+        tf1 = Transform.identity()
+        tf2 = Transform.from_pos_quat(np.array([1.0, 0.0, 0.0]), np.array([0, 0, 0, 1]))
+        
+        total, rot, trans = transform_distance(tf1, tf2)
+        
+        assert abs(rot) < 1e-6
+        np.testing.assert_allclose(trans, 1.0, rtol=1e-6)
+
+    def test_transform_distance_pure_rotation(self):
+        """Transform distance for pure rotation should only have rotation component."""
+        tf1 = Transform.identity()
+        # 90 degrees around Z
+        angle = np.pi / 2
+        quat = np.array([0, 0, np.sin(angle/2), np.cos(angle/2)])
+        tf2 = Transform.from_pos_quat(np.array([0, 0, 0]), quat)
+        
+        total, rot, trans = transform_distance(tf1, tf2)
+        
+        assert abs(trans) < 1e-6
+        np.testing.assert_allclose(rot, np.pi / 2, rtol=1e-5)
+
+    def test_transform_distance_weights(self):
+        """Transform distance should respect weights."""
+        tf1 = Transform.identity()
+        # Some rotation and translation
+        quat = np.array([0, 0, np.sin(np.pi/8), np.cos(np.pi/8)])  # 45 deg
+        tf2 = Transform.from_pos_quat(np.array([1.0, 0, 0]), quat)
+        
+        _, rot, trans = transform_distance(tf1, tf2, rotation_weight=1.0, translation_weight=1.0)
+        
+        # With different weights
+        total_weighted, _, _ = transform_distance(
+            tf1, tf2, rotation_weight=2.0, translation_weight=0.5
+        )
+        
+        expected = 2.0 * rot + 0.5 * trans
+        np.testing.assert_allclose(total_weighted, expected, rtol=1e-6)
+
+    def test_transform_distance_degrees(self):
+        """Transform distance should support degrees output."""
+        tf1 = Transform.identity()
+        # 90 degrees around Z
+        angle = np.pi / 2
+        quat = np.array([0, 0, np.sin(angle/2), np.cos(angle/2)])
+        tf2 = Transform.from_pos_quat(np.array([0, 0, 0]), quat)
+        
+        _, rot_rad, _ = transform_distance(tf1, tf2, degrees=False)
+        _, rot_deg, _ = transform_distance(tf1, tf2, degrees=True)
+        
+        np.testing.assert_allclose(rot_rad, np.pi / 2, rtol=1e-5)
+        np.testing.assert_allclose(rot_deg, 90.0, rtol=1e-5)
+
+    def test_transform_distance_batched(self):
+        """Transform distance should work with batches."""
+        traj1 = np.random.randn(10, 9)
+        traj2 = np.random.randn(10, 9)
+        tf1 = Transform.from_rep(traj1, from_rep="rotation_6d")
+        tf2 = Transform.from_rep(traj2, from_rep="rotation_6d")
+        
+        total, rot, trans = transform_distance(tf1, tf2, reduce=False)
+        
+        assert total.shape == (10,)
+        assert rot.shape == (10,)
+        assert trans.shape == (10,)
+
+    def test_transform_distance_reduce(self):
+        """Reduce=True should return mean distances as floats."""
+        traj1 = np.random.randn(10, 9)
+        traj2 = np.random.randn(10, 9)
+        tf1 = Transform.from_rep(traj1, from_rep="rotation_6d")
+        tf2 = Transform.from_rep(traj2, from_rep="rotation_6d")
+        
+        total_r, rot_r, trans_r = transform_distance(tf1, tf2, reduce=True)
+        total_u, rot_u, trans_u = transform_distance(tf1, tf2, reduce=False)
+        
+        assert isinstance(total_r, float)
+        assert isinstance(rot_r, float)
+        assert isinstance(trans_r, float)
+        np.testing.assert_allclose(total_r, np.mean(total_u), rtol=1e-6)
+
+    def test_transform_distance_torch(self):
+        """Transform distance should work with PyTorch tensors."""
+        traj1 = torch.randn(10, 9)
+        traj2 = torch.randn(10, 9)
+        tf1 = Transform.from_rep(traj1, from_rep="rotation_6d")
+        tf2 = Transform.from_rep(traj2, from_rep="rotation_6d")
+        
+        total, rot, trans = transform_distance(tf1, tf2, reduce=False)
+        
+        assert isinstance(total, torch.Tensor)
+        assert isinstance(rot, torch.Tensor)
+        assert isinstance(trans, torch.Tensor)
+
+    def test_transform_distance_torch_gradient(self):
+        """Gradients should flow through transform distance."""
+        traj1 = torch.randn(10, 9)
+        traj2 = torch.randn(10, 9)
+        tf1 = Transform.from_rep(traj1, from_rep="rotation_6d", requires_grad=True)
+        tf2 = Transform.from_rep(traj2, from_rep="rotation_6d")
+        
+        total, rot, trans = transform_distance(tf1, tf2, reduce=False)
+        loss = total.mean()
+        loss.backward()
+        
+        assert tf1.rotation.grad is not None
+        assert tf1.translation.grad is not None
+        assert not torch.isnan(tf1.rotation.grad).any()
+        assert not torch.isnan(tf1.translation.grad).any()
+
+    def test_transform_distance_numpy_torch_consistency(self):
+        """NumPy and PyTorch should give consistent results."""
+        traj1 = np.random.randn(10, 9)
+        traj2 = np.random.randn(10, 9)
+        
+        tf1_np = Transform.from_rep(traj1, from_rep="rotation_6d")
+        tf2_np = Transform.from_rep(traj2, from_rep="rotation_6d")
+        tf1_torch = Transform.from_rep(torch.from_numpy(traj1).float(), from_rep="rotation_6d")
+        tf2_torch = Transform.from_rep(torch.from_numpy(traj2).float(), from_rep="rotation_6d")
+        
+        total_np, rot_np, trans_np = transform_distance(tf1_np, tf2_np, reduce=False)
+        total_torch, rot_torch, trans_torch = transform_distance(tf1_torch, tf2_torch, reduce=False)
+        
+        np.testing.assert_allclose(total_np, total_torch.numpy(), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(rot_np, rot_torch.numpy(), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(trans_np, trans_torch.numpy(), rtol=1e-5, atol=1e-6)
 
 
 # =============================================================================

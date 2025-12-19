@@ -70,6 +70,8 @@ from .main import (
     # Utilities
     xyz_rotation_6d_to_matrix,
     geodesic_distance,
+    translation_distance,
+    transform_distance,
     orthogonalize_rotation,
 )
 
@@ -156,6 +158,8 @@ __all__ = [
     # Utilities
     "xyz_rotation_6d_to_matrix",
     "geodesic_distance",
+    "translation_distance",
+    "transform_distance",
     "orthogonalize_rotation",
     # Backward compatibility
     "rotation_from_rep",

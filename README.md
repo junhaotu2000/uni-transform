@@ -68,17 +68,23 @@ transformed = tf.transform_point(points)
 
 ```python
 import torch
-from uni_transform import rotation_6d_to_matrix, geodesic_distance
+from uni_transform import Transform, geodesic_distance, translation_distance, transform_distance
 
-# 6D rotation is ideal for neural networks (continuous, no singularities)
-pred_rot6d = model(input)  # Shape: (batch, 6)
+# Create transforms from 6D rotation representation (ideal for neural networks)
+pred_traj = torch.randn(100, 9)  # [x, y, z, rot6d]
+target_traj = torch.randn(100, 9)
 
-# Convert to rotation matrix
-pred_matrix = rotation_6d_to_matrix(pred_rot6d)  # Shape: (batch, 3, 3)
+pred = Transform.from_rep(pred_traj, from_rep="rotation_6d", requires_grad=True)
+target = Transform.from_rep(target_traj, from_rep="rotation_6d")
 
-# Compute geodesic loss (gradients flow through)
-loss = geodesic_distance(pred_matrix, target_matrix, reduce=False).mean()
-loss.backward()
+# Option 1: Individual losses
+rot_loss = geodesic_distance(pred.rotation, target.rotation, reduce=False)
+trans_loss = translation_distance(pred.translation, target.translation, reduce=False)
+
+# Option 2: Combined transform distance (returns tuple: total, rot, trans)
+total_loss, rot_loss, trans_loss = transform_distance(pred, target, reduce=False)
+loss = total_loss.mean()
+loss.backward()  # Gradients flow through all operations
 ```
 
 ### Rotation Conversions
@@ -162,11 +168,16 @@ from uni_transform import transform_interpolate, transform_sequence_interpolate
 # Interpolate between two transforms
 tf_mid = transform_interpolate(tf_start, tf_end, t=0.5)
 
-# Interpolate along a trajectory
-keyframes = [tf0, tf1, tf2, tf3]
-times = np.array([0.0, 1.0, 2.0, 3.0])
-query_times = np.array([0.5, 1.5, 2.5])
-interpolated = transform_sequence_interpolate(keyframes, times, query_times)
+# Interpolate along a trajectory (batched transform input)
+keyframes = np.array([
+    [0, 0, 0, 0, 0, 0],  # [x, y, z, euler...]
+    [1, 0, 0, 0, 0, 0],
+    [2, 0, 0, 0, 0, 0],
+])
+transforms = Transform.from_rep(keyframes, from_rep="euler")  # Batched Transform
+times = np.array([0.0, 1.0, 2.0])
+query_times = np.array([0.5, 1.5])
+interpolated = transform_sequence_interpolate(transforms, times, query_times)
 ```
 
 ### SE(3) Lie Group Operations
@@ -218,9 +229,14 @@ transform_recovered = se3_exp(twist)
 - `quaternion_slerp(q0, q1, t)` - Spherical linear interpolation
 - `quaternion_nlerp(q0, q1, t)` - Normalized linear interpolation
 
+#### Distance & Loss Functions
+
+- `geodesic_distance(R1, R2)` - Rotation angle between matrices (radians)
+- `translation_distance(t1, t2, p=2.0)` - Distance between translations (L1/L2 norm)
+- `transform_distance(tf1, tf2)` - Combined rotation + translation distance
+
 #### Utilities
 
-- `geodesic_distance(R1, R2)` - Rotation angle between matrices
 - `orthogonalize_rotation(matrix)` - Project to SO(3) via SVD
 - `se3_log(transform)` / `se3_exp(twist)` - SE(3) Lie group operations
 

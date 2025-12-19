@@ -1279,6 +1279,7 @@ class Transform:
         seq: str = "ZYX",
         degrees: bool = False,
         euler_in_rpy: bool = False,
+        requires_grad: bool = False,
     ) -> "Transform":
         """
         Create transform from translation + rotation representation.
@@ -1289,6 +1290,7 @@ class Transform:
             seq: Euler sequence (if euler)
             degrees: If euler, whether angles are in degrees
             euler_in_rpy: If True and from_rep is euler, input euler is in [r,p,y] order
+            requires_grad: If True, enable gradient tracking (PyTorch only)
         
         Returns:
             Transform instance
@@ -1296,7 +1298,10 @@ class Transform:
         from_rep = RotationRepr(from_rep)
         
         if from_rep == RotationRepr.MATRIX:
-            return cls.from_matrix(tf)
+            result = cls.from_matrix(tf)
+            if requires_grad and result.backend == "torch":
+                result.requires_grad_(True)
+            return result
         
         translation = tf[..., :3]
         rotation_part = tf[..., 3:]
@@ -1304,7 +1309,10 @@ class Transform:
             rotation_part, from_rep, seq=seq, degrees=degrees, euler_in_rpy=euler_in_rpy
         )
         
-        return cls(rotation=rotation, translation=translation)
+        result = cls(rotation=rotation, translation=translation)
+        if requires_grad and result.backend == "torch":
+            result.requires_grad_(True)
+        return result
     
     @classmethod
     def from_pos_quat(
@@ -1505,6 +1513,11 @@ class Transform:
     def batch_shape(self) -> Tuple[int, ...]:
         """Get batch dimensions."""
         return self.rotation.shape[:-2]
+    
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        """Get shape (alias for batch_shape, for consistency with tensor API)."""
+        return self.rotation.shape
     
     @property
     def is_batched(self) -> bool:
@@ -1898,7 +1911,7 @@ def transform_interpolate(
     q1 = matrix_to_quaternion(tf1.rotation)
     
     # Spherical interpolation for rotation
-    if rotation_method == "slerp":
+    if rotation_method == "slerp":  
         q_interp = quaternion_slerp(q0, q1, t)
     elif rotation_method == "nlerp":
         q_interp = quaternion_nlerp(q0, q1, t)
@@ -1912,7 +1925,7 @@ def transform_interpolate(
 
 
 def transform_sequence_interpolate(
-    transforms: List[Transform],
+    transforms: Transform,
     times: ArrayLike,
     query_times: ArrayLike,
     rotation_method: Literal["slerp", "nlerp"] = "slerp",
@@ -1922,7 +1935,7 @@ def transform_sequence_interpolate(
     Interpolate a sequence of transforms at query times (vectorized).
     
     Args:
-        transforms: List of Transform objects (keyframes)
+        transforms: Batched Transform with shape (N, ...) containing keyframes
         times: Times corresponding to each transform (N,)
         query_times: Times at which to interpolate (M,)
         rotation_method: "slerp" or "nlerp"
@@ -1933,27 +1946,32 @@ def transform_sequence_interpolate(
         Transform with batch dimension (M, ...)
     
     Example:
-        >>> tfs = [Transform.identity(), tf1, tf2]
-        >>> times = np.array([0.0, 1.0, 2.0])
-        >>> query = np.array([0.5, 1.5])
+        >>> traj = torch.randn(100, 9)  # 100 keyframes
+        >>> tfs = Transform.from_rep(traj, from_rep="rotation_6d")
+        >>> times = torch.linspace(0, 1, 100)
+        >>> query = torch.linspace(0, 1, 1000)
         >>> result = transform_sequence_interpolate(tfs, times, query)
     """
-    n_keyframes = len(transforms)
+    # Get number of keyframes from first batch dimension
+    n_keyframes = transforms.rotation.shape[0]
     if n_keyframes < 2:
         raise ValueError("Need at least 2 transforms for interpolation")
-    if n_keyframes != len(times):
-        raise ValueError(f"transforms ({n_keyframes}) and times ({len(times)}) must have same length")
     
-    backend = transforms[0].backend
-    dtype = transforms[0].rotation.dtype
-    device = transforms[0].device if backend == "torch" else None
+    backend = transforms.backend
+    dtype = transforms.rotation.dtype
+    device = transforms.device if backend == "torch" else None
     
-    # Stack all rotations and translations from keyframes
+    # Get rotations and translations directly from batched transform
+    all_rot = transforms.rotation  # (N, 3, 3)
+    all_trans = transforms.translation  # (N, 3)
+    
     if backend == "numpy":
         times = np.asarray(times)
         query_times = np.asarray(query_times)
-        all_rot = np.stack([tf.rotation for tf in transforms], axis=0)  # (N, 3, 3)
-        all_trans = np.stack([tf.translation for tf in transforms], axis=0)  # (N, 3)
+        
+        if n_keyframes != len(times):
+            raise ValueError(f"transforms ({n_keyframes}) and times ({len(times)}) must have same length")
+        
         all_quat = matrix_to_quaternion(all_rot)  # (N, 4)
         
         # Vectorized search for all query times at once
@@ -1994,8 +2012,9 @@ def transform_sequence_interpolate(
         if not isinstance(query_times, torch.Tensor):
             query_times = torch.tensor(query_times, dtype=dtype, device=device)
         
-        all_rot = torch.stack([tf.rotation for tf in transforms], dim=0)  # (N, 3, 3)
-        all_trans = torch.stack([tf.translation for tf in transforms], dim=0)  # (N, 3)
+        if n_keyframes != len(times):
+            raise ValueError(f"transforms ({n_keyframes}) and times ({len(times)}) must have same length")
+        
         all_quat = matrix_to_quaternion(all_rot)  # (N, 4)
         
         # Vectorized search
@@ -2286,6 +2305,130 @@ def geodesic_distance(
         angle = np.rad2deg(angle)
     
     return float(np.mean(angle)) if reduce else angle
+
+@overload
+def translation_distance(
+    t1: np.ndarray, t2: np.ndarray, reduce: Literal[True] = ..., p: float = ...
+) -> float: ...
+@overload
+def translation_distance(
+    t1: np.ndarray, t2: np.ndarray, reduce: Literal[False] = ..., p: float = ...
+) -> np.ndarray: ...
+@overload
+def translation_distance(
+    t1: torch.Tensor, t2: torch.Tensor, reduce: Literal[True] = ..., p: float = ...
+) -> float: ...
+@overload
+def translation_distance(
+    t1: torch.Tensor, t2: torch.Tensor, reduce: Literal[False] = ..., p: float = ...
+) -> torch.Tensor: ...
+
+
+def translation_distance(
+    t1: ArrayLike,
+    t2: ArrayLike,
+    reduce: bool = True,
+    p: float = 2.0,
+) -> Union[float, ArrayLike]:
+    """
+    Compute distance between translation vectors.
+    
+    Args:
+        t1: First translation vector(s) (..., 3)
+        t2: Second translation vector(s) (..., 3)
+        reduce: If True, return mean distance as float
+        p: Norm type (1.0 for L1, 2.0 for L2/Euclidean)
+    
+    Returns:
+        If reduce=True: float (mean distance)
+        If reduce=False: array of distances with same shape as batch dims
+    """
+    backend = _get_backend(t1)
+    
+    if backend == "torch":
+        diff = t1 - t2
+        if p == 2.0:
+            dist = torch.norm(diff, dim=-1)
+        elif p == 1.0:
+            dist = torch.abs(diff).sum(dim=-1)
+        else:
+            dist = torch.norm(diff, p=p, dim=-1)
+        
+        return dist.mean().item() if reduce else dist
+    
+    diff = t1 - t2
+    if p == 2.0:
+        dist = np.linalg.norm(diff, axis=-1)
+    elif p == 1.0:
+        dist = np.abs(diff).sum(axis=-1)
+    else:
+        dist = np.linalg.norm(diff, ord=p, axis=-1)
+    
+    return float(np.mean(dist)) if reduce else dist
+
+@overload
+def transform_distance(
+    tf1: Transform,
+    tf2: Transform,
+    reduce: Literal[True] = ...,
+    rotation_weight: float = ...,
+    translation_weight: float = ...,
+    degrees: bool = ...,
+) -> Tuple[float, float, float]: ...
+@overload
+def transform_distance(
+    tf1: Transform,
+    tf2: Transform,
+    reduce: Literal[False] = ...,
+    rotation_weight: float = ...,
+    translation_weight: float = ...,
+    degrees: bool = ...,
+) -> Tuple[ArrayLike, ArrayLike, ArrayLike]: ...
+
+
+def transform_distance(
+    tf1: Transform,
+    tf2: Transform,
+    reduce: bool = True,
+    rotation_weight: float = 1.0,
+    translation_weight: float = 1.0,
+    degrees: bool = False,
+) -> Union[float, ArrayLike, Tuple[ArrayLike, ArrayLike, ArrayLike]]:
+    """
+    Compute distance between transforms (rotation + translation).
+    
+    Args:
+        tf1: First transform
+        tf2: Second transform
+        reduce: If True, return mean distances as floats
+        rotation_weight: Weight for rotation loss in total
+        translation_weight: Weight for translation loss in total
+        degrees: If True, return rotation angle in degrees
+    
+    Returns:
+        If reduce=True: tuple of (total_loss, rotation_loss, translation_loss) as floats
+        If reduce=False: tuple of (total_loss, rotation_loss, translation_loss) as arrays
+    
+    Example:
+        >>> pred = Transform.from_rep(pred_traj, from_rep="rotation_6d")
+        >>> target = Transform.from_rep(target_traj, from_rep="rotation_6d")
+        >>> total, rot_loss, trans_loss = transform_distance(pred, target)
+    """
+    rot_dist = geodesic_distance(tf1.rotation, tf2.rotation, reduce=False, degrees=degrees)
+    trans_dist = translation_distance(tf1.translation, tf2.translation, reduce=False)
+    
+    backend = tf1.backend
+    
+    if backend == "torch":
+        total = rotation_weight * rot_dist + translation_weight * trans_dist
+        if reduce:
+            return total.mean().item(), rot_dist.mean().item(), trans_dist.mean().item()
+        return total, rot_dist, trans_dist
+    
+    total = rotation_weight * rot_dist + translation_weight * trans_dist
+    if reduce:
+        return float(np.mean(total)), float(np.mean(rot_dist)), float(np.mean(trans_dist))
+    return total, rot_dist, trans_dist
 
 
 @overload
