@@ -114,6 +114,14 @@ _EULER_SEQ_TO_RPY_MAPPING = {
     "YXZ": (1, 0, 2),
 }
 
+# Expected dimensions for each representation (translation=3 + rotation)
+_REP_ROTATION_DIMS = {
+    RotationRepr.EULER: 3,
+    RotationRepr.QUAT: 4,
+    RotationRepr.ROTATION_6D: 6,
+    RotationRepr.ROT_VEC: 3,
+}
+
 
 # =============================================================================
 # Backend Detection & Utilities
@@ -1335,6 +1343,24 @@ class Transform:
         """
         from_rep = RotationRepr(from_rep)
         
+        # Validate extra_dims
+        if extra_dims < 0:
+            raise ValueError(f"extra_dims must be non-negative, got {extra_dims}")
+        
+        if from_rep != RotationRepr.MATRIX:
+            rot_dims = _REP_ROTATION_DIMS.get(from_rep, 0)
+            min_dims = 3 + rot_dims  # translation (3) + rotation
+            total_dims = tf.shape[-1]
+            expected_extra = total_dims - min_dims
+            
+            if extra_dims > expected_extra:
+                raise ValueError(
+                    f"extra_dims={extra_dims} exceeds available dimensions. "
+                    f"Input has {total_dims} dims, {from_rep.value} requires "
+                    f"{min_dims} (3 translation + {rot_dims} rotation), "
+                    f"leaving {expected_extra} for extra."
+                )
+
         # Extract extra dimensions if specified
         extra = None
         if extra_dims > 0:
