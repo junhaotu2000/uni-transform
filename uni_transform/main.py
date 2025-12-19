@@ -1,18 +1,10 @@
 """
 Unified transform utilities supporting both NumPy and PyTorch backends.
 
-This is an optimized rewrite of transform_utils.py with:
-- Consistent Gram-Schmidt implementation across backends
-- Unified quaternion convention (xyzw throughout)
-- Cleaner dispatch pattern using handler registries
-- Better type hints with @overload for IDE support
-- Performance optimizations (cached index tensors)
-- Protocol-based backend abstraction for extensibility
-
 Usage
 -----
 NumPy:
-    from robot_common.utils.transform_utils_v2 import Transform, convert_rotation
+    from uni_transform import Transform, convert_rotation
     tf_np = Transform.from_rep(
         np.array([0.1, 0.2, 0.3, 0.0, 0.1, 0.2]),
         from_rep="euler",
