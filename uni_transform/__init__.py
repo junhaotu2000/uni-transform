@@ -6,6 +6,8 @@ A high-performance library for 3D rigid body transformations with:
 - Unified quaternion convention (xyzw throughout)
 - Full PyTorch gradient support for differentiable robotics
 - Arbitrary batch dimension support
+- Extra state support (gripper width, joint states, etc.)
+- Explicit translation units (meters/millimeters)
 
 API Styles
 ----------
@@ -19,14 +21,20 @@ Two styles for rotation conversions:
     >>> matrix = convert_rotation(data, from_rep="quat", to_rep="matrix")
     >>> euler = convert_rotation(data, from_rep=config["input_format"], to_rep="euler")
 
-3. Transform Class - for full poses (rotation + translation):
-    >>> tf = Transform.from_rep(np.array([x, y, z, r, p, y]), from_rep="euler")
-    >>> quat_rep = tf.to_rep("quat")  # [x, y, z, qx, qy, qz, qw]
+3. Transform Class - for full poses (rotation + translation + extra):
+    >>> tf = Transform.from_rep(
+    ...     np.array([x, y, z, qx, qy, qz, qw, gripper]),
+    ...     from_rep="quat",
+    ...     extra_dims=1,
+    ...     translation_unit="m",
+    ... )
+    >>> quat_rep = tf.to_rep("quat")  # [x, y, z, qx, qy, qz, qw, gripper]
+    >>> tf_mm = tf.to_unit("mm")  # Convert translation to millimeters
 
 See README.md for detailed guidance on when to use each style.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .main import (
     # Core types & constants
