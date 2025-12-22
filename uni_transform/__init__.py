@@ -33,7 +33,9 @@ from .main import (
     ArrayLike,
     Backend,
     RotationRepr,
+    TranslationUnit,
     Transform,
+    UnitMismatchError,
     EPS,
     SMALL_ANGLE_THRESHOLD,
     # 6D rotation
@@ -121,7 +123,9 @@ __all__ = [
     "ArrayLike",
     "Backend",
     "RotationRepr",
+    "TranslationUnit",
     "Transform",
+    "UnitMismatchError",
     "EPS",
     "SMALL_ANGLE_THRESHOLD",
     # 6D rotation

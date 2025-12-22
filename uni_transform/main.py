@@ -66,12 +66,21 @@ import functools
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Literal, Tuple, TypeVar, Union, overload
 
-import numpy as np
 import torch
+import numpy as np
+from enum import Enum
 import torch.nn.functional as F
 from scipy.spatial.transform import Rotation as ScipyRotation
-from enum import Enum
 
+
+# Generic type variable for preserving input type in return
+T = TypeVar("T", np.ndarray, torch.Tensor)
+ArrayLike = Union[np.ndarray, torch.Tensor]
+Backend = Literal["numpy", "torch"]
+
+# Numerical constants - use these instead of magic numbers
+EPS = 1e-8  # General epsilon for division safety
+SMALL_ANGLE_THRESHOLD = 1e-6  # Below this, use Taylor approximations
 
 # =============================================================================
 # Type Definitions & Constants
@@ -84,15 +93,26 @@ class RotationRepr(str, Enum):
     ROTATION_6D = "rotation_6d"
     ROT_VEC = "rot_vec"
 
-# Generic type variable for preserving input type in return
-T = TypeVar("T", np.ndarray, torch.Tensor)
-ArrayLike = Union[np.ndarray, torch.Tensor]
-Backend = Literal["numpy", "torch"]
 
-# Numerical constants - use these instead of magic numbers
-EPS = 1e-8  # General epsilon for division safety
-SMALL_ANGLE_THRESHOLD = 1e-6  # Below this, use Taylor approximations
-
+# Translation Unit Enum
+class TranslationUnit(str, Enum):
+    """Translation unit for Transform class."""
+    METER = "m"
+    MILLIMETER = "mm"
+    
+    @property
+    def to_meter_scale(self) -> float:
+        """Scale factor to convert to meters."""
+        if self == TranslationUnit.METER:
+            return 1.0
+        elif self == TranslationUnit.MILLIMETER:
+            return 0.001
+        raise ValueError(f"Unknown unit: {self}")
+    
+    @property
+    def from_meter_scale(self) -> float:
+        """Scale factor to convert from meters."""
+        return 1.0 / self.to_meter_scale
 
 # Most robot states use RPY order [roll, pitch, yaw], 
 # but seq like "ZYX" expects [yaw, pitch, roll]
@@ -122,6 +142,13 @@ _REP_ROTATION_DIMS = {
     RotationRepr.ROT_VEC: 3,
 }
 
+# Unit conversion factors
+_UNIT_CONVERSION = {
+    (TranslationUnit.METER, TranslationUnit.MILLIMETER): 1000.0,
+    (TranslationUnit.MILLIMETER, TranslationUnit.METER): 0.001,
+    (TranslationUnit.METER, TranslationUnit.METER): 1.0,
+    (TranslationUnit.MILLIMETER, TranslationUnit.MILLIMETER): 1.0,
+}
 
 # =============================================================================
 # Backend Detection & Utilities
@@ -1219,6 +1246,11 @@ def convert_rotation(
 # =============================================================================
 
 
+class UnitMismatchError(ValueError):
+    """Raised when attempting to combine transforms with different translation units."""
+    pass
+
+
 @dataclass
 class Transform:
     """
@@ -1227,28 +1259,40 @@ class Transform:
     Attributes:
         rotation: Rotation matrix (..., 3, 3)
         translation: Translation vector (..., 3)
+        translation_unit: Unit of translation ("m" for meters, "mm" for millimeters)
         extra: Optional extra state like gripper width (..., K). Participates in
                interpolation and distance calculations.
         backend: "numpy" or "torch" (auto-detected from inputs)
     
+    Note:
+        Transforms with different translation units cannot be combined directly.
+        Use `to_unit()` to convert between units before combining.
+    
     Example:
-        >>> # With gripper width
+        >>> # With gripper width and unit
         >>> tf = Transform.from_rep(
         ...     np.array([1, 2, 3, 0, 0, 0, 1, 0.04]),  # [x,y,z,quat,gripper]
         ...     from_rep="quat",
         ...     extra_dims=1,
+        ...     translation_unit="m",
         ... )
+        >>> tf_mm = tf.to_unit("mm")  # Convert to millimeters
         >>> tf.extra  # array([0.04])
         >>> pose = tf.to_rep("euler")  # [x,y,z,euler,gripper]
     """
     
     rotation: ArrayLike
     translation: ArrayLike
+    translation_unit: TranslationUnit = TranslationUnit.METER
     extra: ArrayLike = None  # Optional: gripper width, joint states, etc. (..., K)
     backend: Backend = field(init=False)
     
     def __post_init__(self) -> None:
         """Validate and normalize inputs."""
+        # Normalize translation_unit to enum
+        if isinstance(self.translation_unit, str):
+            self.translation_unit = TranslationUnit(self.translation_unit)
+        
         # Detect backend from inputs
         rot_backend = _get_backend(self.rotation)
         trans_backend = _get_backend(self.translation)
@@ -1290,19 +1334,25 @@ class Transform:
         dtype=None,
         device=None,
         extra_dims: int = 0,
+        translation_unit: Union[str, TranslationUnit] = TranslationUnit.METER,
     ) -> "Transform":
         """Create identity transform with optional extra dimensions (initialized to zero)."""
         rot = _eye(3, backend, dtype=dtype, device=device)
         trans = _zeros((3,), backend, dtype=dtype, device=device)
         extra = _zeros((extra_dims,), backend, dtype=dtype, device=device) if extra_dims > 0 else None
-        return cls(rotation=rot, translation=trans, extra=extra)
+        return cls(rotation=rot, translation=trans, translation_unit=translation_unit, extra=extra)
     
     @classmethod
-    def from_matrix(cls, matrix: ArrayLike) -> "Transform":
+    def from_matrix(
+        cls,
+        matrix: ArrayLike,
+        translation_unit: Union[str, TranslationUnit] = TranslationUnit.METER,
+    ) -> "Transform":
         """Create transform from 4x4 homogeneous matrix."""
         return cls(
             rotation=matrix[..., :3, :3],
             translation=matrix[..., :3, 3],
+            translation_unit=translation_unit,
         )
     
     @classmethod
@@ -1316,6 +1366,7 @@ class Transform:
         euler_in_rpy: bool = False,
         extra_dims: int = 0,
         requires_grad: bool = False,
+        translation_unit: Union[str, TranslationUnit] = TranslationUnit.METER,
     ) -> "Transform":
         """
         Create transform from translation + rotation representation + optional extra.
@@ -1328,18 +1379,21 @@ class Transform:
             euler_in_rpy: If True and from_rep is euler, input euler is in [r,p,y] order
             extra_dims: Number of extra dimensions at the end (e.g., 1 for gripper width)
             requires_grad: If True, enable gradient tracking (PyTorch only)
+            translation_unit: Unit of translation ("m" or "mm")
         
         Returns:
             Transform instance with optional extra field
         
         Example:
-            >>> # [x, y, z, qx, qy, qz, qw, gripper_width]
+            >>> # [x, y, z, qx, qy, qz, qw, gripper_width] in millimeters
             >>> tf = Transform.from_rep(
-            ...     np.array([1, 2, 3, 0, 0, 0, 1, 0.04]),
+            ...     np.array([1000, 2000, 3000, 0, 0, 0, 1, 0.04]),
             ...     from_rep="quat",
             ...     extra_dims=1,
+            ...     translation_unit="mm",
             ... )
             >>> tf.extra  # array([0.04])
+            >>> tf_m = tf.to_unit("m")  # Convert to meters
         """
         from_rep = RotationRepr(from_rep)
         
@@ -1368,7 +1422,7 @@ class Transform:
             tf = tf[..., :-extra_dims]
         
         if from_rep == RotationRepr.MATRIX:
-            result = cls.from_matrix(tf)
+            result = cls.from_matrix(tf, translation_unit=translation_unit)
             result.extra = extra
             if requires_grad and result.backend == "torch":
                 result.requires_grad_(True)
@@ -1380,7 +1434,7 @@ class Transform:
             rotation_part, from_rep, seq=seq, degrees=degrees, euler_in_rpy=euler_in_rpy
         )
         
-        result = cls(rotation=rotation, translation=translation, extra=extra)
+        result = cls(rotation=rotation, translation=translation, translation_unit=translation_unit, extra=extra)
         if requires_grad and result.backend == "torch":
             result.requires_grad_(True)
         return result
@@ -1391,6 +1445,7 @@ class Transform:
         position: ArrayLike,
         quaternion: ArrayLike,
         extra: ArrayLike = None,
+        translation_unit: Union[str, TranslationUnit] = TranslationUnit.METER,
     ) -> "Transform":
         """
         Create transform from position and quaternion.
@@ -1401,6 +1456,7 @@ class Transform:
             position: Translation vector (..., 3)
             quaternion: Quaternion in xyzw format (..., 4)
             extra: Optional extra state like gripper width (..., K)
+            translation_unit: Unit of translation ("m" or "mm")
         
         Returns:
             Transform instance
@@ -1409,30 +1465,45 @@ class Transform:
             >>> pos = np.array([1.0, 2.0, 3.0])
             >>> quat = np.array([0, 0, 0, 1])  # identity
             >>> gripper = np.array([0.04])
-            >>> tf = Transform.from_pos_quat(pos, quat, extra=gripper)
+            >>> tf = Transform.from_pos_quat(pos, quat, extra=gripper, translation_unit="m")
         """
         rotation = quaternion_to_matrix(quaternion)
-        return cls(rotation=rotation, translation=position, extra=extra)
+        return cls(rotation=rotation, translation=position, translation_unit=translation_unit, extra=extra)
     
     @classmethod
     def stack(cls, transforms: List["Transform"], axis: int = 0) -> "Transform":
         """
         Stack multiple transforms into a batched transform.
         
+        All transforms must have the same translation unit.
+        
         Args:
-            transforms: List of Transform objects
+            transforms: List of Transform objects (must have same translation_unit)
             axis: Axis along which to stack (default: 0)
         
         Returns:
             Batched Transform (extra is stacked if all transforms have extra)
         
+        Raises:
+            UnitMismatchError: If transforms have different translation units
+        
         Example:
-            >>> tf1 = Transform.identity()
-            >>> tf2 = Transform.from_pos_quat([1, 0, 0], [0, 0, 0, 1])
+            >>> tf1 = Transform.identity(translation_unit="m")
+            >>> tf2 = Transform.from_pos_quat([1, 0, 0], [0, 0, 0, 1], translation_unit="m")
             >>> batched = Transform.stack([tf1, tf2])  # shape: (2, 3, 3) and (2, 3)
         """
         if not transforms:
             raise ValueError("Cannot stack empty list of transforms")
+        
+        # Check all transforms have the same unit
+        first_unit = transforms[0].translation_unit
+        for i, tf in enumerate(transforms[1:], 1):
+            if tf.translation_unit != first_unit:
+                raise UnitMismatchError(
+                    f"Cannot stack transforms with different translation units: "
+                    f"transforms[0] has {first_unit.value}, transforms[{i}] has {tf.translation_unit.value}. "
+                    f"Use to_unit() to convert to the same unit first."
+                )
         
         backend = transforms[0].backend
         
@@ -1452,7 +1523,7 @@ class Transform:
             if all_have_extra:
                 extra = torch.stack([tf.extra for tf in transforms], dim=axis)
         
-        return cls(rotation=rotation, translation=translation, extra=extra)
+        return cls(rotation=rotation, translation=translation, translation_unit=first_unit, extra=extra)
     
     # -------------------------------------------------------------------------
     # Conversion Methods
@@ -1530,14 +1601,25 @@ class Transform:
         The result transforms points as: self.transform(other.transform(point))
         
         Note:
-            Extra from `other` is preserved in the result (the "inner" transform's state).
-            This is useful for robot control where you apply a world-frame delta to a pose
-            and want to keep the pose's gripper state.
+            - Both transforms must have the same translation unit.
+            - Extra from `other` is preserved in the result (the "inner" transform's state).
+              This is useful for robot control where you apply a world-frame delta to a pose
+              and want to keep the pose's gripper state.
+        
+        Raises:
+            UnitMismatchError: If transforms have different translation units.
         """
         if self.backend != other.backend:
             raise ValueError(
                 f"Cannot compose transforms with different backends: "
                 f"{self.backend} vs {other.backend}"
+            )
+        
+        if self.translation_unit != other.translation_unit:
+            raise UnitMismatchError(
+                f"Cannot compose transforms with different translation units: "
+                f"{self.translation_unit.value} vs {other.translation_unit.value}. "
+                f"Use to_unit() to convert to the same unit first."
             )
         
         rotation = _matmul(self.rotation, other.rotation)
@@ -1550,17 +1632,17 @@ class Transform:
         # This is the common case: delta @ pose -> keep pose's gripper state
         extra = other.extra if other.extra is not None else self.extra
         
-        return Transform(rotation=rotation, translation=translation, extra=extra)
+        return Transform(rotation=rotation, translation=translation, translation_unit=self.translation_unit, extra=extra)
     
     def compose(self, other: "Transform") -> "Transform":
         """Alias for @ operator."""
         return self @ other
     
     def inverse(self) -> "Transform":
-        """Compute inverse transform (extra is preserved)."""
+        """Compute inverse transform (extra and translation_unit are preserved)."""
         rot_inv = _transpose_last_two(self.rotation)
         trans_inv = -_matmul(rot_inv, self.translation[..., None]).squeeze(-1)
-        return Transform(rotation=rot_inv, translation=trans_inv, extra=self.extra)
+        return Transform(rotation=rot_inv, translation=trans_inv, translation_unit=self.translation_unit, extra=self.extra)
     
     def transform_point(self, point: ArrayLike) -> ArrayLike:
         """Apply transform to point(s)."""
@@ -1576,20 +1658,25 @@ class Transform:
         Apply a delta (incremental) transform.
         
         Useful for robot control where velocities are integrated.
+        Both transforms must have the same translation unit.
         
         Args:
-            delta: Incremental transform to apply
+            delta: Incremental transform to apply (must have same translation_unit)
             in_world_frame: If True, delta is in world frame (result = delta @ self)
                            If False, delta is in local frame (result = self @ delta)
         
         Returns:
             Updated Transform
         
+        Raises:
+            UnitMismatchError: If transforms have different translation units.
+        
         Example:
-            >>> current_pose = Transform.identity()
-            >>> delta = Transform.from_pos_quat([0.01, 0, 0], [0, 0, 0, 1])
+            >>> current_pose = Transform.identity(translation_unit="m")
+            >>> delta = Transform.from_pos_quat([0.01, 0, 0], [0, 0, 0, 1], translation_unit="m")
             >>> new_pose = current_pose.apply_delta(delta)  # Moved 1cm in x
         """
+        # Unit check is done in __matmul__
         if in_world_frame:
             return delta @ self
         else:
@@ -1601,13 +1688,18 @@ class Transform:
         
         Returns T such that: reference @ T = self
         Equivalent to: reference.inverse() @ self
+        Both transforms must have the same translation unit.
         
         Args:
-            reference: Reference transform
+            reference: Reference transform (must have same translation_unit)
         
         Returns:
             Transform in reference frame
+        
+        Raises:
+            UnitMismatchError: If transforms have different translation units.
         """
+        # Unit check is done in __matmul__
         return reference.inverse() @ self
     
     # -------------------------------------------------------------------------
@@ -1702,7 +1794,46 @@ class Transform:
         rot = self.rotation.to(device=device, dtype=dtype)
         trans = self.translation.to(device=device, dtype=dtype)
         extra = self.extra.to(device=device, dtype=dtype) if self.extra is not None else None
-        return Transform(rotation=rot, translation=trans, extra=extra)
+        return Transform(rotation=rot, translation=trans, translation_unit=self.translation_unit, extra=extra)
+    
+    def to_unit(self, target_unit: Union[str, TranslationUnit]) -> "Transform":
+        """
+        Convert translation to a different unit.
+        
+        Args:
+            target_unit: Target unit ("m" or "mm")
+        
+        Returns:
+            New Transform with converted translation
+        
+        Example:
+            >>> tf_m = Transform.from_pos_quat([1.0, 2.0, 3.0], [0, 0, 0, 1], translation_unit="m")
+            >>> tf_mm = tf_m.to_unit("mm")  # Translation becomes [1000, 2000, 3000]
+            >>> tf_m_again = tf_mm.to_unit("m")  # Back to [1.0, 2.0, 3.0]
+        """
+        if isinstance(target_unit, str):
+            target_unit = TranslationUnit(target_unit)
+        
+        if target_unit == self.translation_unit:
+            return self.clone()
+        
+        # Get conversion factor
+        scale = _UNIT_CONVERSION[(self.translation_unit, target_unit)]
+        
+        # Scale translation
+        if self.backend == "torch":
+            new_translation = self.translation * scale
+        else:
+            new_translation = self.translation * scale
+        
+        return Transform(
+            rotation=self.rotation.clone() if self.backend == "torch" else self.rotation.copy(),
+            translation=new_translation,
+            translation_unit=target_unit,
+            extra=self.extra.clone() if self.backend == "torch" and self.extra is not None else (
+                self.extra.copy() if self.extra is not None else None
+            ),
+        )
     
     def detach(self) -> "Transform":
         """Detach from computation graph (PyTorch only)."""
@@ -1711,6 +1842,7 @@ class Transform:
         return Transform(
             rotation=self.rotation.detach(),
             translation=self.translation.detach(),
+            translation_unit=self.translation_unit,
             extra=self.extra.detach() if self.extra is not None else None,
         )
     
@@ -1720,11 +1852,13 @@ class Transform:
             return Transform(
                 rotation=self.rotation.clone(),
                 translation=self.translation.clone(),
+                translation_unit=self.translation_unit,
                 extra=self.extra.clone() if self.extra is not None else None,
             )
         return Transform(
             rotation=self.rotation.copy(),
             translation=self.translation.copy(),
+            translation_unit=self.translation_unit,
             extra=self.extra.copy() if self.extra is not None else None,
         )
     
@@ -1736,7 +1870,8 @@ class Transform:
             extra_info = f", extra_dims={extra_shape}"
         return (
             f"Transform(backend={self.backend}, "
-            f"batch_shape={self.batch_shape}{extra_info}, "
+            f"batch_shape={self.batch_shape}, "
+            f"unit={self.translation_unit.value}{extra_info}, "
             f"dtype={self.dtype})"
         )
     
@@ -1745,6 +1880,7 @@ class Transform:
         return Transform(
             rotation=self.rotation[idx],
             translation=self.translation[idx],
+            translation_unit=self.translation_unit,
             extra=self.extra[idx] if self.extra is not None else None,
         )
     
@@ -1761,14 +1897,17 @@ class Transform:
         seq: str = "ZYX",
         degrees: bool = False,
         euler_in_rpy: bool = False,
+        translation_unit: Union[str, TranslationUnit] = TranslationUnit.METER,
     ) -> ArrayLike:
         """
         Convert transform between representations without creating Transform instance.
         
         More efficient for one-off conversions.
+        Note: translation_unit is preserved but not used in pure rotation representation conversions.
         """
         transform = Transform.from_rep(
-            tf, from_rep=from_rep, seq=seq, degrees=degrees, euler_in_rpy=euler_in_rpy
+            tf, from_rep=from_rep, seq=seq, degrees=degrees, euler_in_rpy=euler_in_rpy,
+            translation_unit=translation_unit,
         )
         return transform.to_rep(to_rep, seq=seq, degrees=degrees, euler_in_rpy=euler_in_rpy)
 
@@ -2006,15 +2145,19 @@ def transform_interpolate(
     
     Uses linear interpolation for translation and extra (e.g., gripper width),
     and spherical interpolation for rotation (via quaternions).
+    Both transforms must have the same translation unit.
     
     Args:
         tf0: Start transform
-        tf1: End transform
+        tf1: End transform (must have same translation_unit as tf0)
         t: Interpolation parameter(s) in [0, 1]. t=0 returns tf0, t=1 returns tf1.
         rotation_method: "slerp" (accurate) or "nlerp" (fast)
     
     Returns:
         Interpolated Transform (including interpolated extra if both have extra)
+    
+    Raises:
+        UnitMismatchError: If transforms have different translation units.
     
     Example:
         >>> tf0 = Transform.from_rep([0,0,0,0,0,0,1,0.08], from_rep="quat", extra_dims=1)
@@ -2026,6 +2169,13 @@ def transform_interpolate(
         raise ValueError(
             f"Cannot interpolate transforms with different backends: "
             f"{tf0.backend} vs {tf1.backend}"
+        )
+    
+    if tf0.translation_unit != tf1.translation_unit:
+        raise UnitMismatchError(
+            f"Cannot interpolate transforms with different translation units: "
+            f"{tf0.translation_unit.value} vs {tf1.translation_unit.value}. "
+            f"Use to_unit() to convert to the same unit first."
         )
     
     backend = tf0.backend
@@ -2080,7 +2230,7 @@ def transform_interpolate(
     # Convert back to rotation matrix
     rotation = quaternion_to_matrix(q_interp)
     
-    return Transform(rotation=rotation, translation=translation, extra=extra)
+    return Transform(rotation=rotation, translation=translation, translation_unit=tf0.translation_unit, extra=extra)
 
 
 def transform_sequence_interpolate(
@@ -2224,7 +2374,7 @@ def transform_sequence_interpolate(
         
         rotation = quaternion_to_matrix(q_interp)  # (M, 3, 3)
     
-    return Transform(rotation=rotation, translation=translation, extra=extra)
+    return Transform(rotation=rotation, translation=translation, translation_unit=transforms.translation_unit, extra=extra)
 
 
 # =============================================================================
@@ -2319,12 +2469,15 @@ def se3_log(transform: Transform) -> ArrayLike:
 
 
 @overload
-def se3_exp(twist: np.ndarray) -> Transform: ...
+def se3_exp(twist: np.ndarray, translation_unit: Union[str, TranslationUnit] = ...) -> Transform: ...
 @overload
-def se3_exp(twist: torch.Tensor) -> Transform: ...
+def se3_exp(twist: torch.Tensor, translation_unit: Union[str, TranslationUnit] = ...) -> Transform: ...
 
 
-def se3_exp(twist: ArrayLike) -> Transform:
+def se3_exp(
+    twist: ArrayLike,
+    translation_unit: Union[str, TranslationUnit] = TranslationUnit.METER,
+) -> Transform:
     """
     Compute SE(3) exponential (twist to transform).
     
@@ -2334,9 +2487,10 @@ def se3_exp(twist: ArrayLike) -> Transform:
         twist: 6D twist vector (..., 6) as [omega (3), v (3)]
                - omega: rotation vector (axis * angle)
                - v: linear velocity component
+        translation_unit: Unit of the translation component ("m" or "mm")
     
     Returns:
-        Transform corresponding to the twist
+        Transform corresponding to the twist with specified unit
     
     Note:
         This is the inverse of se3_log.
@@ -2391,7 +2545,7 @@ def se3_exp(twist: ArrayLike) -> Transform:
             v + c1 * omega_cross_v + c2 * omega_cross_omega_cross_v
         )
     
-    return Transform(rotation=rotation, translation=translation)
+    return Transform(rotation=rotation, translation=translation, translation_unit=translation_unit)
 
 
 # =============================================================================
@@ -2576,9 +2730,11 @@ def transform_distance(
     """
     Compute distance between transforms (rotation + translation + extra).
     
+    Both transforms must have the same translation unit.
+    
     Args:
         tf1: First transform
-        tf2: Second transform
+        tf2: Second transform (must have same translation_unit as tf1)
         reduce: If True, return mean distances as floats
         rotation_weight: Weight for rotation loss in total
         translation_weight: Weight for translation loss in total
@@ -2591,11 +2747,21 @@ def transform_distance(
         If reduce=False: all as arrays
         Note: extra_loss is 0.0 if neither transform has extra
     
+    Raises:
+        UnitMismatchError: If transforms have different translation units.
+    
     Example:
         >>> pred = Transform.from_rep(pred_traj, from_rep="rotation_6d", extra_dims=1)
         >>> target = Transform.from_rep(target_traj, from_rep="rotation_6d", extra_dims=1)
         >>> total, rot_loss, trans_loss, extra_loss = transform_distance(pred, target)
     """
+    if tf1.translation_unit != tf2.translation_unit:
+        raise UnitMismatchError(
+            f"Cannot compute distance between transforms with different translation units: "
+            f"{tf1.translation_unit.value} vs {tf2.translation_unit.value}. "
+            f"Use to_unit() to convert to the same unit first."
+        )
+    
     rot_dist = geodesic_distance(tf1.rotation, tf2.rotation, reduce=False, degrees=degrees)
     trans_dist = translation_distance(tf1.translation, tf2.translation, reduce=False)
     
