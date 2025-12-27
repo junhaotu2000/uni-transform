@@ -7,17 +7,14 @@ and transform sequence interpolation.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, Union, overload
+from typing import Literal, Union, overload
 
 import numpy as np
 import torch
 
 from ._core import ArrayLike, EPS, SMALL_ANGLE_THRESHOLD, get_backend
 from .rotation_conversions import matrix_to_quaternion, quaternion_to_matrix
-
-if TYPE_CHECKING:
-    from .transform import Transform
-    from ._core import UnitMismatchError
+from .transform import Transform
 
 
 # =============================================================================

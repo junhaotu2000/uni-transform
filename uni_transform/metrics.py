@@ -6,15 +6,13 @@ Provides geodesic distance, translation distance, and transform distance functio
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, Tuple, Union, overload
+from typing import Literal, Tuple, Union, overload
 
 import numpy as np
 import torch
 
 from ._core import ArrayLike, get_backend, matmul, transpose_last_two
-
-if TYPE_CHECKING:
-    from .transform import Transform
+from .transform import Transform
 
 
 # =============================================================================

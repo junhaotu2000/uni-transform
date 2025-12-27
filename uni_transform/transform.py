@@ -35,7 +35,7 @@ from .rotation_conversions import (
 )
 
 
-@dataclass
+@dataclass(slots=True, eq=False)
 class Transform:
     """
     Rigid body transform supporting both NumPy and PyTorch backends.

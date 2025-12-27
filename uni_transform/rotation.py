@@ -8,7 +8,7 @@ supporting both NumPy and PyTorch backends.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Tuple, Union
+from typing import List, Tuple, Union
 
 import numpy as np
 import torch
@@ -35,11 +35,8 @@ from .rotation_conversions import (
     rotvec_to_matrix,
 )
 
-if TYPE_CHECKING:
-    from .interpolation import quaternion_nlerp, quaternion_slerp
 
-
-@dataclass
+@dataclass(slots=True, eq=False)
 class Rotation:
     """
     Rotation class with unified from_rep/to_rep API.
