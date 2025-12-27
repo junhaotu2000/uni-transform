@@ -1432,19 +1432,29 @@ class TestErrorHandling:
         with pytest.raises(ValueError, match="only supported for PyTorch"):
             rot.requires_grad_(True)
 
-    def test_to_on_numpy(self):
-        """Should raise error for to() on NumPy."""
+    def test_to_backend_conversion(self):
+        """Test to() supports backend conversion."""
         tf = Transform.identity(backend="numpy")
         
-        with pytest.raises(ValueError, match="only supported for PyTorch"):
-            tf.to(device="cpu")
+        # NumPy -> PyTorch
+        tf_torch = tf.to(backend="torch")
+        assert tf_torch.backend == "torch"
+        
+        # PyTorch -> NumPy
+        tf_np = tf_torch.to(backend="numpy")
+        assert tf_np.backend == "numpy"
 
-    def test_rotation_to_on_numpy(self):
-        """Should raise error for to() on NumPy Rotation."""
+    def test_rotation_to_backend_conversion(self):
+        """Test Rotation to() supports backend conversion."""
         rot = Rotation.identity(backend="numpy")
         
-        with pytest.raises(ValueError, match="only supported for PyTorch"):
-            rot.to(device="cpu")
+        # NumPy -> PyTorch
+        rot_torch = rot.to(backend="torch")
+        assert rot_torch.backend == "torch"
+        
+        # PyTorch -> NumPy
+        rot_np = rot_torch.to(backend="numpy")
+        assert rot_np.backend == "numpy"
 
     def test_xyz_rotation_6d_wrong_shape(self):
         """Should raise error for wrong xyz_rotation_6d shape."""

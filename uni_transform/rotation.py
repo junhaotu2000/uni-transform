@@ -20,6 +20,7 @@ from ._core import (
     eye,
     get_backend,
     matmul,
+    to_backend,
     transpose_last_two,
 )
 from .rotation_conversions import (
@@ -374,11 +375,20 @@ class Rotation:
     # Utility Methods
     # -------------------------------------------------------------------------
 
-    def to(self, device=None, dtype=None) -> "Rotation":
-        """Move rotation to device/dtype (PyTorch only)."""
-        if self.backend != "torch":
-            raise ValueError("to() is only supported for PyTorch tensors")
-        return Rotation(matrix=self.matrix.to(device=device, dtype=dtype))
+    def to(self, backend: Backend = None, device=None, dtype=None) -> "Rotation":
+        """
+        Move rotation to backend/device/dtype.
+
+        Args:
+            backend: Target backend ("numpy" or "torch"). If None, keeps current backend.
+            device: Target device (PyTorch only)
+            dtype: Target data type
+
+        Returns:
+            Rotation in target backend/device/dtype
+        """
+        target_backend = backend or self.backend
+        return Rotation(matrix=to_backend(self.matrix, target_backend, dtype=dtype, device=device))
 
     def detach(self) -> "Rotation":
         """Detach from computation graph (PyTorch only)."""
