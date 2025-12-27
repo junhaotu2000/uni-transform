@@ -1,66 +1,82 @@
 """
-uni_transform - Unified transform utilities supporting both NumPy and PyTorch backends.
-
-A high-performance library for 3D rigid body transformations with:
-- Consistent Gram-Schmidt implementation across backends
-- Unified quaternion convention (xyzw throughout)
-- Full PyTorch gradient support for differentiable robotics
-- Arbitrary batch dimension support
-- Extra state support (gripper width, joint states, etc.)
-- Explicit translation units (meters/millimeters)
+Unified transform utilities supporting both NumPy and PyTorch backends.
 
 API Styles
 ----------
-Two styles for rotation conversions:
+This library provides three API styles:
 
-1. Direct Functions - for fixed, known conversions (type-safe, fast):
-    >>> matrix = quaternion_to_matrix(quat)
-    >>> euler = matrix_to_euler(matrix, seq="ZYX")
+1. Direct Functions (recommended for fixed conversions):
+   - Type-safe, zero runtime overhead, clear signatures
+   - Examples: quaternion_to_matrix(), euler_to_matrix(), matrix_to_rotvec()
 
-2. Generic Functions - for dynamic/configurable conversions:
-    >>> matrix = convert_rotation(data, from_rep="quat", to_rep="matrix")
-    >>> euler = convert_rotation(data, from_rep=config["input_format"], to_rep="euler")
+2. Generic Functions (recommended for dynamic/configurable conversions):
+   - Flexible, representation determined at runtime
+   - Examples: convert_rotation(), rotation_to_matrix(), matrix_to_rotation()
 
-3. Transform Class - for full poses (rotation + translation + extra):
-    >>> tf = Transform.from_rep(
-    ...     np.array([x, y, z, qx, qy, qz, qw, gripper]),
-    ...     from_rep="quat",
-    ...     extra_dims=1,
-    ...     translation_unit="m",
-    ... )
-    >>> quat_rep = tf.to_rep("quat")  # [x, y, z, qx, qy, qz, qw, gripper]
-    >>> tf_mm = tf.to_unit("mm")  # Convert translation to millimeters
+3. Class-based API (recommended for object-oriented usage):
+   - Rotation class: for rotations only
+   - Transform class: for full poses (rotation + translation)
+   - Unified from_rep/to_rep interface
 
-See README.md for detailed guidance on when to use each style.
+Usage Examples
+--------------
+Direct rotation conversion (fixed path):
+    matrix = quaternion_to_matrix(quat)
+    euler = matrix_to_euler(matrix, seq="ZYX")
+
+Generic rotation conversion (dynamic path):
+    matrix = convert_rotation(rotation, from_rep=input_format, to_rep="matrix")
+
+Rotation class (for rotations only):
+    rot = Rotation.from_rep(quat, from_rep="quat")
+    euler = rot.to_rep("euler", seq="ZYX")
+    rot_composed = rot1 @ rot2
+    rotated_v = rot.apply(v)
+
+Transform class (for poses):
+    tf = Transform.from_rep(
+        np.array([x, y, z, roll, pitch, yaw]),
+        from_rep="euler",
+        seq="ZYX",
+    )
+    quat_rep = tf.to_rep("quat")  # [x, y, z, qx, qy, qz, qw]
+
+Conventions
+-----------
+- Quaternion: xyzw (matches SciPy/ROS convention)
+- Euler: default seq="ZYX", can be overridden
+- Rotation matrix: (..., 3, 3)
+- Transform matrix: (..., 4, 4), rotation in [:3, :3], translation in [:3, 3]
 """
 
-__version__ = "0.2.0"
-
-from .main import (
-    # Core types & constants
+# Types and constants
+from ._core import (
     ArrayLike,
     Backend,
-    RotationRepr,
-    TranslationUnit,
-    Transform,
-    UnitMismatchError,
     EPS,
+    RotationRepr,
     SMALL_ANGLE_THRESHOLD,
+    TranslationUnit,
+    UnitMismatchError,
+)
+
+# Rotation conversion functions
+from .rotation_conversions import (
     # 6D rotation
     matrix_to_rotation_6d,
     rotation_6d_to_matrix,
-    # Quaternion (xyzw)
+    # Quaternion
     quaternion_to_matrix,
     matrix_to_quaternion,
     quaternion_conjugate,
     quaternion_inverse,
     quaternion_multiply,
     quaternion_apply,
-    # Euler
+    # Euler angles
     euler_to_matrix,
     matrix_to_euler,
     matrix_to_euler_differentiable,
-    # Rotation vector
+    # Rotation vector (axis-angle)
     rotvec_to_matrix,
     matrix_to_rotvec,
     quaternion_to_rotvec,
@@ -69,77 +85,50 @@ from .main import (
     rotation_to_matrix,
     matrix_to_rotation,
     convert_rotation,
-    # Interpolation
+    # Utilities
+    orthogonalize_rotation,
+    xyz_rotation_6d_to_matrix,
+)
+
+# Classes
+from .rotation import Rotation
+from .transform import Transform
+
+# Interpolation
+from .interpolation import (
     quaternion_slerp,
     quaternion_nlerp,
     transform_interpolate,
     transform_sequence_interpolate,
-    # SE(3) Lie group operations
-    se3_log,
-    se3_exp,
-    # Utilities
-    xyz_rotation_6d_to_matrix,
+)
+
+# SE(3) Lie group
+from .se3 import se3_log, se3_exp
+
+# Metrics
+from .metrics import (
     geodesic_distance,
     translation_distance,
     transform_distance,
-    orthogonalize_rotation,
 )
 
-
-# =============================================================================
-# Backward Compatibility Aliases
-# =============================================================================
-
-def rotation_from_rep(rotation, from_rep, **kwargs):
-    """Deprecated: Use rotation_to_matrix instead."""
-    return rotation_to_matrix(rotation, from_rep, **kwargs)
-
-
-def rotation_to_rep(matrix, to_rep, **kwargs):
-    """Deprecated: Use matrix_to_rotation instead."""
-    return matrix_to_rotation(matrix, to_rep, **kwargs)
-
-
-def mtx_to_rot_6d(matrix):
-    """Deprecated: Use matrix_to_rotation_6d instead."""
-    return matrix_to_rotation_6d(matrix)
-
-
-def rot_6d_to_mtx(rot_6d):
-    """Deprecated: Use rotation_6d_to_matrix instead."""
-    return rotation_6d_to_matrix(rot_6d)
-
-
-def convert_transform(tf, *, from_rep, to_rep, **kwargs):
-    """Deprecated: Use Transform.convert instead."""
-    return Transform.convert(tf, from_rep=from_rep, to_rep=to_rep, **kwargs)
-
-
-def geodesic_loss(R1, R2, reduce=True, degrees=False):
-    """Deprecated: Use geodesic_distance instead."""
-    return geodesic_distance(R1, R2, reduce=reduce, degrees=degrees)
-
-
-# =============================================================================
-# Module Exports
-# =============================================================================
-
 __all__ = [
-    # Version
-    "__version__",
-    # Core types & constants
+    # Types
     "ArrayLike",
     "Backend",
     "RotationRepr",
     "TranslationUnit",
-    "Transform",
-    "UnitMismatchError",
+    # Constants
     "EPS",
     "SMALL_ANGLE_THRESHOLD",
+    # Classes
+    "Rotation",
+    "Transform",
+    "UnitMismatchError",
     # 6D rotation
     "matrix_to_rotation_6d",
     "rotation_6d_to_matrix",
-    # Quaternion (xyzw)
+    # Quaternion
     "quaternion_to_matrix",
     "matrix_to_quaternion",
     "quaternion_conjugate",
@@ -164,20 +153,15 @@ __all__ = [
     "quaternion_nlerp",
     "transform_interpolate",
     "transform_sequence_interpolate",
-    # SE(3) Lie group operations
+    # SE(3)
     "se3_log",
     "se3_exp",
-    # Utilities
-    "xyz_rotation_6d_to_matrix",
+    # Metrics
     "geodesic_distance",
     "translation_distance",
     "transform_distance",
     "orthogonalize_rotation",
-    # Backward compatibility
-    "rotation_from_rep",
-    "rotation_to_rep",
-    "mtx_to_rot_6d",
-    "rot_6d_to_mtx",
-    "convert_transform",
-    "geodesic_loss",
+    "xyz_rotation_6d_to_matrix",
 ]
+
+__version__ = "0.3.0"
