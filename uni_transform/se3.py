@@ -6,16 +6,14 @@ Provides logarithm and exponential maps between rigid transforms and twists.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Union, overload
+from typing import Union, overload
 
 import numpy as np
 import torch
 
 from ._core import ArrayLike, EPS, SMALL_ANGLE_THRESHOLD, TranslationUnit, get_backend
 from .rotation_conversions import matrix_to_rotvec, rotvec_to_matrix
-
-if TYPE_CHECKING:
-    from .transform import Transform
+from .transform import Transform
 
 
 @overload
