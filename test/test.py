@@ -9,6 +9,10 @@ Test categories:
 5. Interpolation
 6. Batch operations
 7. Transform class methods
+8. Rotation class methods
+9. SE(3) Lie group operations
+10. Distance functions
+11. Error handling
 
 Run with:
     pytest test/test.py -v
@@ -24,9 +28,13 @@ import pytest
 import torch
 
 from uni_transform import (
-    # Core
+    # Classes
+    Rotation,
     Transform,
+    UnitMismatchError,
+    # Types
     RotationRepr,
+    TranslationUnit,
     # 6D rotation
     matrix_to_rotation_6d,
     rotation_6d_to_matrix,
@@ -64,6 +72,7 @@ from uni_transform import (
     translation_distance,
     transform_distance,
     orthogonalize_rotation,
+    xyz_rotation_6d_to_matrix,
 )
 
 
@@ -620,6 +629,21 @@ class TestBatchOperations:
         assert tf_0.rotation.shape == (3, 3)
         assert tf_0.translation.shape == (3,)
 
+    def test_rotation_batched_operations(self):
+        """Rotation operations should work with batched data."""
+        matrices = np.random.randn(5, 3, 3)
+        matrices = orthogonalize_rotation(matrices)
+        
+        rot = Rotation(matrix=matrices)
+        
+        assert rot.batch_shape == (5,)
+        assert rot.is_batched is True
+        
+        # Test indexing
+        rot_0 = rot[0]
+        assert rot_0.matrix.shape == (3, 3)
+        assert rot_0.is_batched is False
+
 
 # =============================================================================
 # Test: Transform Class
@@ -772,6 +796,289 @@ class TestTransformClass:
         tf_slice = tf[1:3]
         assert tf_slice.rotation.shape == (2, 3, 3)
 
+    def test_unit_conversion(self):
+        """Test translation unit conversion."""
+        tf_m = Transform.from_pos_quat(
+            np.array([1.0, 2.0, 3.0]),
+            np.array([0, 0, 0, 1]),
+            translation_unit="m"
+        )
+        
+        tf_mm = tf_m.to_unit("mm")
+        
+        assert tf_mm.translation_unit == TranslationUnit.MILLIMETER
+        np.testing.assert_allclose(tf_mm.translation, [1000.0, 2000.0, 3000.0])
+
+    def test_unit_mismatch_error(self):
+        """Test that composing transforms with different units raises error."""
+        tf_m = Transform.identity(translation_unit="m")
+        tf_mm = Transform.identity(translation_unit="mm")
+        
+        with pytest.raises(UnitMismatchError):
+            tf_m @ tf_mm
+
+    def test_convert_static_method(self):
+        """Test static convert method."""
+        pose_euler = np.array([1.0, 2.0, 3.0, 0.1, 0.2, 0.3])
+        
+        pose_quat = Transform.convert(pose_euler, from_rep="euler", to_rep="quat")
+        
+        assert pose_quat.shape == (7,)  # 3 translation + 4 quaternion
+
+
+# =============================================================================
+# Test: Rotation Class
+# =============================================================================
+
+
+class TestRotationClass:
+    """Test Rotation class methods."""
+
+    def test_identity(self):
+        """Test identity rotation creation."""
+        rot_np = Rotation.identity(backend="numpy")
+        rot_torch = Rotation.identity(backend="torch")
+        
+        np.testing.assert_allclose(rot_np.matrix, np.eye(3))
+        assert torch.allclose(rot_torch.matrix, torch.eye(3))
+
+    def test_from_rep_quat(self):
+        """Test creating Rotation from quaternion."""
+        quat = np.array([0, 0, 0, 1])
+        rot = Rotation.from_rep(quat, from_rep="quat")
+        
+        np.testing.assert_allclose(rot.matrix, np.eye(3), atol=1e-6)
+
+    def test_from_rep_euler(self):
+        """Test creating Rotation from euler angles."""
+        euler = np.array([0.1, 0.2, 0.3])
+        rot = Rotation.from_rep(euler, from_rep="euler", seq="ZYX")
+        
+        assert rot.matrix.shape == (3, 3)
+        # Verify it's a valid rotation matrix
+        np.testing.assert_allclose(rot.matrix @ rot.matrix.T, np.eye(3), atol=1e-6)
+
+    def test_from_rep_rotvec(self):
+        """Test creating Rotation from rotation vector."""
+        rotvec = np.array([0.1, 0.2, 0.3])
+        rot = Rotation.from_rep(rotvec, from_rep="rot_vec")
+        
+        assert rot.matrix.shape == (3, 3)
+
+    def test_from_rep_rotation_6d(self):
+        """Test creating Rotation from 6D representation."""
+        rot_6d = np.array([1, 0, 0, 0, 1, 0])
+        rot = Rotation.from_rep(rot_6d, from_rep="rotation_6d")
+        
+        np.testing.assert_allclose(rot.matrix, np.eye(3), atol=1e-6)
+
+    def test_convenience_factory_methods(self):
+        """Test from_quat, from_euler, from_rotvec, from_rotation_6d."""
+        quat = np.array([0, 0, 0, 1])
+        euler = np.array([0.1, 0.2, 0.3])
+        rotvec = np.array([0.1, 0.2, 0.3])
+        rot_6d = np.array([1, 0, 0, 0, 1, 0])
+        
+        rot_quat = Rotation.from_quat(quat)
+        rot_euler = Rotation.from_euler(euler, seq="ZYX")
+        rot_rotvec = Rotation.from_rotvec(rotvec)
+        rot_6d_obj = Rotation.from_rotation_6d(rot_6d)
+        
+        assert rot_quat.matrix.shape == (3, 3)
+        assert rot_euler.matrix.shape == (3, 3)
+        assert rot_rotvec.matrix.shape == (3, 3)
+        assert rot_6d_obj.matrix.shape == (3, 3)
+
+    def test_to_rep_roundtrip(self):
+        """Test to_rep and from_rep roundtrip."""
+        euler_orig = np.array([0.1, 0.2, 0.3])
+        rot = Rotation.from_euler(euler_orig, seq="ZYX")
+        
+        # Convert to various representations and back
+        quat = rot.to_rep("quat")
+        rot_from_quat = Rotation.from_quat(quat)
+        
+        np.testing.assert_allclose(rot.matrix, rot_from_quat.matrix, atol=1e-6)
+
+    def test_as_methods(self):
+        """Test as_matrix, as_quat, as_euler, as_rotvec, as_rotation_6d."""
+        rot = Rotation.identity()
+        
+        matrix = rot.as_matrix()
+        quat = rot.as_quat()
+        euler = rot.as_euler(seq="ZYX")
+        rotvec = rot.as_rotvec()
+        rot_6d = rot.as_rotation_6d()
+        
+        assert matrix.shape == (3, 3)
+        assert quat.shape == (4,)
+        assert euler.shape == (3,)
+        assert rotvec.shape == (3,)
+        assert rot_6d.shape == (6,)
+
+    def test_composition(self):
+        """Test rotation composition with @ operator."""
+        # Rotate 0.5 rad around Z, then another 0.5 rad
+        rot1 = Rotation.from_euler(np.array([0.5, 0, 0]), seq="ZYX")  # Z rotation
+        rot2 = Rotation.from_euler(np.array([0.5, 0, 0]), seq="ZYX")  # Z rotation
+        
+        composed = rot1 @ rot2
+        euler = composed.as_euler(seq="ZYX")
+        
+        # Combined should be 1.0 rad around Z
+        np.testing.assert_allclose(euler[0], 1.0, atol=1e-6)
+
+    def test_inverse(self):
+        """Test rotation inverse."""
+        rot = Rotation.from_euler(np.array([0.1, 0.2, 0.3]), seq="ZYX")
+        rot_inv = rot.inverse()
+        
+        composed = rot @ rot_inv
+        
+        np.testing.assert_allclose(composed.matrix, np.eye(3), atol=1e-6)
+
+    def test_apply(self):
+        """Test applying rotation to vectors."""
+        # 90 degree rotation around Z
+        rot = Rotation.from_euler(np.array([np.pi/2, 0, 0]), seq="ZYX")
+        v = np.array([1, 0, 0])
+        
+        rotated = rot.apply(v)
+        
+        np.testing.assert_allclose(rotated, [0, 1, 0], atol=1e-6)
+
+    def test_apply_delta(self):
+        """Test apply_delta method."""
+        rot = Rotation.from_euler(np.array([0, 0, 0.3]))
+        delta = Rotation.from_euler(np.array([0, 0, 0.2]))
+        
+        # World frame: delta @ rot
+        result_world = rot.apply_delta(delta, in_body_frame=False)
+        expected_world = delta @ rot
+        np.testing.assert_allclose(result_world.matrix, expected_world.matrix, atol=1e-6)
+        
+        # Body frame: rot @ delta
+        result_body = rot.apply_delta(delta, in_body_frame=True)
+        expected_body = rot @ delta
+        np.testing.assert_allclose(result_body.matrix, expected_body.matrix, atol=1e-6)
+
+    def test_relative_to(self):
+        """Test relative_to method."""
+        ref = Rotation.from_euler(np.array([0, 0, 0.5]))
+        rot = Rotation.from_euler(np.array([0, 0, 1.0]))
+        
+        relative = rot.relative_to(ref)
+        
+        # ref @ relative should equal rot
+        reconstructed = ref @ relative
+        np.testing.assert_allclose(reconstructed.matrix, rot.matrix, atol=1e-6)
+
+    def test_slerp(self):
+        """Test slerp method."""
+        rot0 = Rotation.identity()
+        rot1 = Rotation.from_euler(np.array([np.pi/2, 0, 0]), seq="ZYX")  # 90 deg around Z
+        
+        rot_mid = rot0.slerp(rot1, 0.5)
+        euler = rot_mid.as_euler(seq="ZYX")
+        
+        np.testing.assert_allclose(euler[0], np.pi/4, atol=1e-5)  # 45 degrees
+
+    def test_nlerp(self):
+        """Test nlerp method."""
+        rot0 = Rotation.identity()
+        rot1 = Rotation.from_euler(np.array([0.1, 0, 0]), seq="ZYX")  # Small angle
+        
+        rot_mid = rot0.nlerp(rot1, 0.5)
+        
+        # Should be approximately halfway
+        euler = rot_mid.as_euler(seq="ZYX")
+        np.testing.assert_allclose(euler[0], 0.05, atol=1e-3)
+
+    def test_convert_static_method(self):
+        """Test static convert method."""
+        quat = np.array([0, 0, np.sin(np.pi/4), np.cos(np.pi/4)])  # 90 deg around Z
+        
+        euler = Rotation.convert(quat, from_rep="quat", to_rep="euler", seq="ZYX", degrees=True)
+        
+        np.testing.assert_allclose(euler[0], 90.0, atol=1e-4)
+
+    def test_stack(self):
+        """Test stacking rotations."""
+        rot1 = Rotation.identity()
+        rot2 = Rotation.from_euler(np.array([0, 0, 0.5]))
+        rot3 = Rotation.from_euler(np.array([0, 0, 1.0]))
+        
+        batched = Rotation.stack([rot1, rot2, rot3])
+        
+        assert batched.matrix.shape == (3, 3, 3)
+        assert batched.batch_shape == (3,)
+
+    def test_properties(self):
+        """Test rotation properties."""
+        rot = Rotation.identity(backend="numpy")
+        
+        assert rot.batch_shape == ()
+        assert rot.is_batched is False
+        assert rot.device is None
+        assert rot.dtype == np.float64
+
+    def test_clone(self):
+        """Test cloning rotation."""
+        rot = Rotation.from_euler(np.array([0.1, 0.2, 0.3]))
+        rot_clone = rot.clone()
+        
+        np.testing.assert_allclose(rot_clone.matrix, rot.matrix)
+        assert rot_clone.matrix is not rot.matrix
+
+    def test_torch_operations(self):
+        """Test PyTorch-specific operations."""
+        rot = Rotation.identity(backend="torch")
+        
+        # requires_grad
+        rot.requires_grad_(True)
+        assert rot.requires_grad is True
+        
+        # detach
+        rot_detached = rot.detach()
+        assert rot_detached.requires_grad is False
+        
+        # to device
+        rot_cpu = rot.to(device="cpu")
+        assert rot_cpu.device.type == "cpu"
+
+    def test_repr(self):
+        """Test string representation."""
+        rot = Rotation.identity(backend="numpy")
+        repr_str = repr(rot)
+        
+        assert "Rotation" in repr_str
+        assert "numpy" in repr_str
+
+    def test_getitem(self):
+        """Test indexing batched rotations."""
+        matrices = np.stack([np.eye(3)] * 5)
+        rot = Rotation(matrix=matrices)
+        
+        rot_0 = rot[0]
+        assert rot_0.matrix.shape == (3, 3)
+        
+        rot_slice = rot[1:3]
+        assert rot_slice.matrix.shape == (2, 3, 3)
+
+    def test_gradient_flow(self):
+        """Test that gradients flow through Rotation operations."""
+        euler = torch.tensor([0.1, 0.2, 0.3], requires_grad=True)
+        rot = Rotation.from_euler(euler, seq="ZYX")
+        
+        # Apply to a vector
+        v = torch.tensor([1.0, 0.0, 0.0])
+        rotated = rot.apply(v)
+        loss = rotated.sum()
+        loss.backward()
+        
+        assert euler.grad is not None
+        assert not torch.isnan(euler.grad).any()
+
 
 # =============================================================================
 # Test: Utilities
@@ -828,6 +1135,25 @@ class TestUtilities:
             np.testing.assert_allclose(
                 R_ortho[i] @ R_ortho[i].T, np.eye(3), rtol=1e-5, atol=1e-6
             )
+
+    def test_xyz_rotation_6d_to_matrix(self):
+        """Test xyz_rotation_6d_to_matrix function."""
+        # [x, y, z, 6D rotation (identity)]
+        xyz_rot_6d = np.array([1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        
+        matrix = xyz_rotation_6d_to_matrix(xyz_rot_6d)
+        
+        assert matrix.shape == (4, 4)
+        np.testing.assert_allclose(matrix[:3, 3], [1.0, 2.0, 3.0])
+        np.testing.assert_allclose(matrix[:3, :3], np.eye(3), atol=1e-6)
+
+    def test_xyz_rotation_6d_to_matrix_batched(self):
+        """Test xyz_rotation_6d_to_matrix with batched input."""
+        xyz_rot_6d = np.random.randn(5, 9)
+        
+        matrix = xyz_rotation_6d_to_matrix(xyz_rot_6d)
+        
+        assert matrix.shape == (5, 4, 4)
 
 
 # =============================================================================
@@ -918,7 +1244,7 @@ class TestDistanceFunctions:
         """Distance between identical transforms should be zero."""
         tf = Transform.from_rep(np.array([1, 2, 3, 0.1, 0.2, 0.3]), from_rep="euler")
         
-        total, rot, trans = transform_distance(tf, tf)
+        total, rot, trans, extra = transform_distance(tf, tf)
         
         assert abs(total) < 1e-6
         assert abs(rot) < 1e-6
@@ -929,7 +1255,7 @@ class TestDistanceFunctions:
         tf1 = Transform.identity()
         tf2 = Transform.from_pos_quat(np.array([1.0, 0.0, 0.0]), np.array([0, 0, 0, 1]))
         
-        total, rot, trans = transform_distance(tf1, tf2)
+        total, rot, trans, extra = transform_distance(tf1, tf2)
         
         assert abs(rot) < 1e-6
         np.testing.assert_allclose(trans, 1.0, rtol=1e-6)
@@ -942,7 +1268,7 @@ class TestDistanceFunctions:
         quat = np.array([0, 0, np.sin(angle/2), np.cos(angle/2)])
         tf2 = Transform.from_pos_quat(np.array([0, 0, 0]), quat)
         
-        total, rot, trans = transform_distance(tf1, tf2)
+        total, rot, trans, extra = transform_distance(tf1, tf2)
         
         assert abs(trans) < 1e-6
         np.testing.assert_allclose(rot, np.pi / 2, rtol=1e-5)
@@ -954,10 +1280,10 @@ class TestDistanceFunctions:
         quat = np.array([0, 0, np.sin(np.pi/8), np.cos(np.pi/8)])  # 45 deg
         tf2 = Transform.from_pos_quat(np.array([1.0, 0, 0]), quat)
         
-        _, rot, trans = transform_distance(tf1, tf2, rotation_weight=1.0, translation_weight=1.0)
+        _, rot, trans, _ = transform_distance(tf1, tf2, rotation_weight=1.0, translation_weight=1.0)
         
         # With different weights
-        total_weighted, _, _ = transform_distance(
+        total_weighted, _, _, _ = transform_distance(
             tf1, tf2, rotation_weight=2.0, translation_weight=0.5
         )
         
@@ -972,8 +1298,8 @@ class TestDistanceFunctions:
         quat = np.array([0, 0, np.sin(angle/2), np.cos(angle/2)])
         tf2 = Transform.from_pos_quat(np.array([0, 0, 0]), quat)
         
-        _, rot_rad, _ = transform_distance(tf1, tf2, degrees=False)
-        _, rot_deg, _ = transform_distance(tf1, tf2, degrees=True)
+        _, rot_rad, _, _ = transform_distance(tf1, tf2, degrees=False)
+        _, rot_deg, _, _ = transform_distance(tf1, tf2, degrees=True)
         
         np.testing.assert_allclose(rot_rad, np.pi / 2, rtol=1e-5)
         np.testing.assert_allclose(rot_deg, 90.0, rtol=1e-5)
@@ -985,7 +1311,7 @@ class TestDistanceFunctions:
         tf1 = Transform.from_rep(traj1, from_rep="rotation_6d")
         tf2 = Transform.from_rep(traj2, from_rep="rotation_6d")
         
-        total, rot, trans = transform_distance(tf1, tf2, reduce=False)
+        total, rot, trans, extra = transform_distance(tf1, tf2, reduce=False)
         
         assert total.shape == (10,)
         assert rot.shape == (10,)
@@ -998,8 +1324,8 @@ class TestDistanceFunctions:
         tf1 = Transform.from_rep(traj1, from_rep="rotation_6d")
         tf2 = Transform.from_rep(traj2, from_rep="rotation_6d")
         
-        total_r, rot_r, trans_r = transform_distance(tf1, tf2, reduce=True)
-        total_u, rot_u, trans_u = transform_distance(tf1, tf2, reduce=False)
+        total_r, rot_r, trans_r, extra_r = transform_distance(tf1, tf2, reduce=True)
+        total_u, rot_u, trans_u, extra_u = transform_distance(tf1, tf2, reduce=False)
         
         assert isinstance(total_r, float)
         assert isinstance(rot_r, float)
@@ -1013,7 +1339,7 @@ class TestDistanceFunctions:
         tf1 = Transform.from_rep(traj1, from_rep="rotation_6d")
         tf2 = Transform.from_rep(traj2, from_rep="rotation_6d")
         
-        total, rot, trans = transform_distance(tf1, tf2, reduce=False)
+        total, rot, trans, extra = transform_distance(tf1, tf2, reduce=False)
         
         assert isinstance(total, torch.Tensor)
         assert isinstance(rot, torch.Tensor)
@@ -1026,7 +1352,7 @@ class TestDistanceFunctions:
         tf1 = Transform.from_rep(traj1, from_rep="rotation_6d", requires_grad=True)
         tf2 = Transform.from_rep(traj2, from_rep="rotation_6d")
         
-        total, rot, trans = transform_distance(tf1, tf2, reduce=False)
+        total, rot, trans, extra = transform_distance(tf1, tf2, reduce=False)
         loss = total.mean()
         loss.backward()
         
@@ -1045,8 +1371,8 @@ class TestDistanceFunctions:
         tf1_torch = Transform.from_rep(torch.from_numpy(traj1).float(), from_rep="rotation_6d")
         tf2_torch = Transform.from_rep(torch.from_numpy(traj2).float(), from_rep="rotation_6d")
         
-        total_np, rot_np, trans_np = transform_distance(tf1_np, tf2_np, reduce=False)
-        total_torch, rot_torch, trans_torch = transform_distance(tf1_torch, tf2_torch, reduce=False)
+        total_np, rot_np, trans_np, extra_np = transform_distance(tf1_np, tf2_np, reduce=False)
+        total_torch, rot_torch, trans_torch, extra_torch = transform_distance(tf1_torch, tf2_torch, reduce=False)
         
         np.testing.assert_allclose(total_np, total_torch.numpy(), rtol=1e-5, atol=1e-6)
         np.testing.assert_allclose(rot_np, rot_torch.numpy(), rtol=1e-5, atol=1e-6)
@@ -1071,6 +1397,11 @@ class TestErrorHandling:
         with pytest.raises(ValueError, match="must have shape"):
             rotation_6d_to_matrix(np.array([1, 2, 3, 4, 5]))  # Only 5 elements
 
+    def test_rotation_matrix_wrong_shape(self):
+        """Should raise error for wrong rotation matrix shape."""
+        with pytest.raises(ValueError, match="must have shape"):
+            Rotation(matrix=np.eye(4))  # Should be 3x3
+
     def test_transform_backend_mismatch(self):
         """Should raise error for mixing backends in composition."""
         tf_np = Transform.identity(backend="numpy")
@@ -1079,6 +1410,14 @@ class TestErrorHandling:
         with pytest.raises(ValueError, match="different backends"):
             tf_np @ tf_torch
 
+    def test_rotation_backend_mismatch(self):
+        """Should raise error for mixing backends in rotation composition."""
+        rot_np = Rotation.identity(backend="numpy")
+        rot_torch = Rotation.identity(backend="torch")
+        
+        with pytest.raises(ValueError, match="different backends"):
+            rot_np @ rot_torch
+
     def test_requires_grad_on_numpy(self):
         """Should raise error for requires_grad on NumPy."""
         tf = Transform.identity(backend="numpy")
@@ -1086,12 +1425,31 @@ class TestErrorHandling:
         with pytest.raises(ValueError, match="only supported for PyTorch"):
             tf.requires_grad_(True)
 
+    def test_rotation_requires_grad_on_numpy(self):
+        """Should raise error for requires_grad on NumPy Rotation."""
+        rot = Rotation.identity(backend="numpy")
+        
+        with pytest.raises(ValueError, match="only supported for PyTorch"):
+            rot.requires_grad_(True)
+
     def test_to_on_numpy(self):
         """Should raise error for to() on NumPy."""
         tf = Transform.identity(backend="numpy")
         
         with pytest.raises(ValueError, match="only supported for PyTorch"):
             tf.to(device="cpu")
+
+    def test_rotation_to_on_numpy(self):
+        """Should raise error for to() on NumPy Rotation."""
+        rot = Rotation.identity(backend="numpy")
+        
+        with pytest.raises(ValueError, match="only supported for PyTorch"):
+            rot.to(device="cpu")
+
+    def test_xyz_rotation_6d_wrong_shape(self):
+        """Should raise error for wrong xyz_rotation_6d shape."""
+        with pytest.raises(ValueError, match="Expected last dimension 9"):
+            xyz_rotation_6d_to_matrix(np.array([1, 2, 3, 4, 5, 6, 7, 8]))  # Only 8 elements
 
 
 # =============================================================================
@@ -1282,6 +1640,14 @@ class TestTransformAdditionalMethods:
         np.testing.assert_allclose(batched.translation[0], [0, 0, 0])
         np.testing.assert_allclose(batched.translation[1], [1, 0, 0])
         np.testing.assert_allclose(batched.translation[2], [2, 0, 0])
+
+    def test_stack_unit_mismatch(self):
+        """stack should raise error for different translation units."""
+        tf1 = Transform.identity(translation_unit="m")
+        tf2 = Transform.identity(translation_unit="mm")
+        
+        with pytest.raises(UnitMismatchError):
+            Transform.stack([tf1, tf2])
     
     def test_apply_delta_world_frame(self):
         """apply_delta in world frame should compose as delta @ self."""
@@ -1385,6 +1751,20 @@ class TestSE3Operations:
         
         assert twist.grad is not None
         assert not torch.isnan(twist.grad).any()
+
+    def test_se3_batched(self):
+        """SE(3) operations should work with batched inputs."""
+        twists = np.random.randn(5, 6) * 0.1  # Small twists
+        
+        transforms = se3_exp(twists)
+        
+        assert transforms.rotation.shape == (5, 3, 3)
+        assert transforms.translation.shape == (5, 3)
+        
+        # Roundtrip
+        twists_recovered = se3_log(transforms)
+        np.testing.assert_allclose(twists, twists_recovered, atol=1e-5)
+
 
 # =============================================================================
 # Run Tests
