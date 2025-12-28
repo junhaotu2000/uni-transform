@@ -8,8 +8,9 @@ All internal modules depend on this module.
 from __future__ import annotations
 
 import functools
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Literal, Tuple, TypeVar, Union
+from typing import List, Literal, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import torch
@@ -67,6 +68,29 @@ class TranslationUnit(str, Enum):
     def from_meter_scale(self) -> float:
         """Scale factor to convert from meters."""
         return 1.0 / self.to_meter_scale
+
+
+class VectorInterpMethod(str, Enum):
+    """Interpolation methods for vectors/scalars."""
+
+    LINEAR = "linear"
+    MINIMUM_JERK = "minimum_jerk"
+    CUBIC_SPLINE = "cubic_spline"
+
+
+class QuatInterpMethod(str, Enum):
+    """Interpolation methods for quaternions."""
+
+    SLERP = "slerp"
+    NLERP = "nlerp"
+
+
+class RotationSeqInterpMethod(str, Enum):
+    """Interpolation methods for rotation sequences (multi-point)."""
+
+    SLERP = "slerp"
+    NLERP = "nlerp"
+    SQUAD = "squad"
 
 
 class UnitMismatchError(ValueError):

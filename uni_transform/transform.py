@@ -320,26 +320,78 @@ class Transform:
 
         return result
 
-    def as_quat(self) -> ArrayLike:
-        """Return rotation as quaternion (xyzw format)."""
-        return matrix_to_quaternion(self.rotation)
+    def as_quat(self, include_extra: bool = True) -> ArrayLike:
+        """
+        Return pose as [translation, quaternion(xyzw), extra].
+
+        Args:
+            include_extra: If True and extra exists, append extra to output
+
+        Returns:
+            Array of shape (..., 7) or (..., 7+K) if extra exists
+        """
+        quat = matrix_to_quaternion(self.rotation)
+        result = cat([self.translation, quat], dim=-1)
+        if include_extra and self.extra is not None:
+            result = cat([result, self.extra], dim=-1)
+        return result
 
     def as_euler(
         self,
         seq: str = "ZYX",
         degrees: bool = False,
         euler_in_rpy: bool = False,
+        include_extra: bool = True,
     ) -> ArrayLike:
-        """Return rotation as euler angles."""
-        return matrix_to_euler(self.rotation, seq=seq, degrees=degrees, euler_in_rpy=euler_in_rpy)
+        """
+        Return pose as [translation, euler_angles, extra].
 
-    def as_rotvec(self) -> ArrayLike:
-        """Return rotation as rotation vector (axis-angle)."""
-        return matrix_to_rotvec(self.rotation)
+        Args:
+            seq: Euler sequence
+            degrees: If True, return angles in degrees
+            euler_in_rpy: If True, output is in [r,p,y] order
+            include_extra: If True and extra exists, append extra to output
 
-    def as_rotation_6d(self) -> ArrayLike:
-        """Return rotation as 6D rotation representation."""
-        return matrix_to_rotation_6d(self.rotation)
+        Returns:
+            Array of shape (..., 6) or (..., 6+K) if extra exists
+        """
+        euler = matrix_to_euler(self.rotation, seq=seq, degrees=degrees, euler_in_rpy=euler_in_rpy)
+        result = cat([self.translation, euler], dim=-1)
+        if include_extra and self.extra is not None:
+            result = cat([result, self.extra], dim=-1)
+        return result
+
+    def as_rotvec(self, include_extra: bool = True) -> ArrayLike:
+        """
+        Return pose as [translation, rotation_vector, extra].
+
+        Args:
+            include_extra: If True and extra exists, append extra to output
+
+        Returns:
+            Array of shape (..., 6) or (..., 6+K) if extra exists
+        """
+        rotvec = matrix_to_rotvec(self.rotation)
+        result = cat([self.translation, rotvec], dim=-1)
+        if include_extra and self.extra is not None:
+            result = cat([result, self.extra], dim=-1)
+        return result
+
+    def as_rotation_6d(self, include_extra: bool = True) -> ArrayLike:
+        """
+        Return pose as [translation, 6D_rotation, extra].
+
+        Args:
+            include_extra: If True and extra exists, append extra to output
+
+        Returns:
+            Array of shape (..., 9) or (..., 9+K) if extra exists
+        """
+        rot_6d = matrix_to_rotation_6d(self.rotation)
+        result = cat([self.translation, rot_6d], dim=-1)
+        if include_extra and self.extra is not None:
+            result = cat([result, self.extra], dim=-1)
+        return result
 
     # -------------------------------------------------------------------------
     # Transform Operations
