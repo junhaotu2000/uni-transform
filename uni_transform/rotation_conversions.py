@@ -181,7 +181,8 @@ def matrix_to_quaternion(matrix: ArrayLike) -> ArrayLike:
     trace = m[:, 0, 0] + m[:, 1, 1] + m[:, 2, 2]
     quat = torch.zeros(m.shape[0], 4, dtype=matrix.dtype, device=matrix.device)
 
-    # Case 1: trace > 0
+    # Shepperd's method with proper EPS inside sqrt to prevent divide-by-zero
+    # Case 1: trace > 0 (trace + 1 >= 1, always safe)
     mask1 = trace > 0
     if mask1.any():
         s = torch.sqrt(trace[mask1] + 1.0) * 2
@@ -190,10 +191,11 @@ def matrix_to_quaternion(matrix: ArrayLike) -> ArrayLike:
         quat[mask1, 1] = (m[mask1, 0, 2] - m[mask1, 2, 0]) / s
         quat[mask1, 2] = (m[mask1, 1, 0] - m[mask1, 0, 1]) / s
 
-    # Case 2: m[0,0] is largest
+    # Case 2: m[0,0] is largest (clamp inside sqrt)
     mask2 = (~mask1) & (m[:, 0, 0] > m[:, 1, 1]) & (m[:, 0, 0] > m[:, 2, 2])
     if mask2.any():
-        s = torch.sqrt(1.0 + m[mask2, 0, 0] - m[mask2, 1, 1] - m[mask2, 2, 2]) * 2
+        val = torch.clamp(1.0 + m[mask2, 0, 0] - m[mask2, 1, 1] - m[mask2, 2, 2], min=SMALL_ANGLE_THRESHOLD)
+        s = torch.sqrt(val) * 2
         quat[mask2, 3] = (m[mask2, 2, 1] - m[mask2, 1, 2]) / s
         quat[mask2, 0] = 0.25 * s
         quat[mask2, 1] = (m[mask2, 0, 1] + m[mask2, 1, 0]) / s
@@ -202,7 +204,8 @@ def matrix_to_quaternion(matrix: ArrayLike) -> ArrayLike:
     # Case 3: m[1,1] is largest
     mask3 = (~mask1) & (~mask2) & (m[:, 1, 1] > m[:, 2, 2])
     if mask3.any():
-        s = torch.sqrt(1.0 + m[mask3, 1, 1] - m[mask3, 0, 0] - m[mask3, 2, 2]) * 2
+        val = torch.clamp(1.0 + m[mask3, 1, 1] - m[mask3, 0, 0] - m[mask3, 2, 2], min=SMALL_ANGLE_THRESHOLD)
+        s = torch.sqrt(val) * 2
         quat[mask3, 3] = (m[mask3, 0, 2] - m[mask3, 2, 0]) / s
         quat[mask3, 0] = (m[mask3, 0, 1] + m[mask3, 1, 0]) / s
         quat[mask3, 1] = 0.25 * s
@@ -211,7 +214,8 @@ def matrix_to_quaternion(matrix: ArrayLike) -> ArrayLike:
     # Case 4: m[2,2] is largest
     mask4 = (~mask1) & (~mask2) & (~mask3)
     if mask4.any():
-        s = torch.sqrt(1.0 + m[mask4, 2, 2] - m[mask4, 0, 0] - m[mask4, 1, 1]) * 2
+        val = torch.clamp(1.0 + m[mask4, 2, 2] - m[mask4, 0, 0] - m[mask4, 1, 1], min=SMALL_ANGLE_THRESHOLD)
+        s = torch.sqrt(val) * 2
         quat[mask4, 3] = (m[mask4, 1, 0] - m[mask4, 0, 1]) / s
         quat[mask4, 0] = (m[mask4, 0, 2] + m[mask4, 2, 0]) / s
         quat[mask4, 1] = (m[mask4, 1, 2] + m[mask4, 2, 1]) / s
@@ -223,32 +227,22 @@ def matrix_to_quaternion(matrix: ArrayLike) -> ArrayLike:
     return quat.reshape(batch_shape + (4,))
 
 
-@overload
-def quaternion_conjugate(q: np.ndarray) -> np.ndarray: ...
-@overload
-def quaternion_conjugate(q: torch.Tensor) -> torch.Tensor: ...
+# Pre-allocated for common NumPy dtypes (no lookup overhead)
+_CONJ_SIGN_F32 = np.array([-1, -1, -1, 1], dtype=np.float32)
+_CONJ_SIGN_F64 = np.array([-1, -1, -1, 1], dtype=np.float64)
 
 
 def quaternion_conjugate(q: ArrayLike) -> ArrayLike:
-    """
-    Compute quaternion conjugate.
-
-    For unit quaternions, conjugate equals inverse.
-
-    Args:
-        q: Quaternion(s) in xyzw format (..., 4)
-
-    Returns:
-        Conjugate quaternion(s) (..., 4)
-    """
-    backend = get_backend(q)
-
-    if backend == "numpy":
-        result = q.copy()
-        result[..., :3] = -result[..., :3]
-        return result
-
-    return torch.cat([-q[..., :3], q[..., 3:4]], dim=-1)
+    """Compute quaternion conjugate. For unit quaternions, equals inverse."""
+    if isinstance(q, torch.Tensor):
+        # Creating a 4-element tensor is cheap. Don't overthink it.
+        return q * torch.tensor([-1, -1, -1, 1], dtype=q.dtype, device=q.device)
+    # NumPy: use pre-allocated for common dtypes
+    if q.dtype == np.float32:
+        return q * _CONJ_SIGN_F32
+    if q.dtype == np.float64:
+        return q * _CONJ_SIGN_F64
+    return q * np.array([-1, -1, -1, 1], dtype=q.dtype)
 
 
 @overload
@@ -269,15 +263,14 @@ def quaternion_inverse(q: ArrayLike) -> ArrayLike:
     Returns:
         Inverse quaternion(s) (..., 4)
     """
-    backend = get_backend(q)
     conj = quaternion_conjugate(q)
 
-    if backend == "numpy":
-        norm_sq = np.sum(q * q, axis=-1, keepdims=True)
-        return conj / norm_sq
+    if isinstance(q, torch.Tensor):
+        norm_sq = (q * q).sum(dim=-1, keepdim=True)
+        return conj / (norm_sq + SMALL_ANGLE_THRESHOLD)
 
-    norm_sq = (q * q).sum(dim=-1, keepdim=True)
-    return conj / norm_sq
+    norm_sq = np.sum(q * q, axis=-1, keepdims=True)
+    return conj / (norm_sq + SMALL_ANGLE_THRESHOLD)
 
 
 @overload

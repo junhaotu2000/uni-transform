@@ -54,10 +54,13 @@ from ._core import (
     ArrayLike,
     Backend,
     EPS,
+    QuatInterpMethod,
     RotationRepr,
+    RotationSeqInterpMethod,
     SMALL_ANGLE_THRESHOLD,
     TranslationUnit,
     UnitMismatchError,
+    VectorInterpMethod,
 )
 
 # Rotation conversion functions
@@ -96,10 +99,26 @@ from .transform import Transform
 
 # Interpolation
 from .interpolation import (
+    # interpolation functions
+    interpolate,
+    interpolate_sequence,
+    interpolate_rotation,
+    interpolate_rotation_sequence,
+    interpolate_transform,
+    interpolate_transform_sequence,
+    # spline functions
+    SplineCoefficients,
+    compute_spline,
+    # quaternion functions
     quaternion_slerp,
     quaternion_nlerp,
-    transform_interpolate,
-    transform_sequence_interpolate,
+    quaternion_squad,
+    minimum_jerk_interpolate,
+    minimum_jerk_velocity,
+    minimum_jerk_acceleration,
+    cubic_spline_coefficients,
+    cubic_spline_interpolate,
+    cubic_spline_derivative,
 )
 
 # SE(3) Lie group
@@ -118,6 +137,9 @@ __all__ = [
     "Backend",
     "RotationRepr",
     "TranslationUnit",
+    "VectorInterpMethod",
+    "QuatInterpMethod",
+    "RotationSeqInterpMethod",
     # Constants
     "EPS",
     "SMALL_ANGLE_THRESHOLD",
@@ -125,6 +147,16 @@ __all__ = [
     "Rotation",
     "Transform",
     "UnitMismatchError",
+    # Interpolation - Unified API
+    "interpolate",
+    "interpolate_sequence",
+    "interpolate_rotation",
+    "interpolate_rotation_sequence",
+    "interpolate_transform",
+    "interpolate_transform_sequence",
+    # Interpolation - Helpers
+    "SplineCoefficients",
+    "compute_spline",
     # 6D rotation
     "matrix_to_rotation_6d",
     "rotation_6d_to_matrix",
@@ -148,11 +180,23 @@ __all__ = [
     "rotation_to_matrix",
     "matrix_to_rotation",
     "convert_rotation",
-    # Interpolation
+    # Interpolation - Quaternion
     "quaternion_slerp",
     "quaternion_nlerp",
+    "quaternion_squad",
+    # Interpolation - Minimum Jerk
+    "minimum_jerk_interpolate",
+    "minimum_jerk_velocity",
+    "minimum_jerk_acceleration",
+    # Interpolation - Cubic Spline
+    "compute_spline",
+    "cubic_spline_coefficients",
+    "cubic_spline_interpolate",
+    "cubic_spline_derivative",
+    # Interpolation - Transform
     "transform_interpolate",
     "transform_sequence_interpolate",
+    "transform_minimum_jerk_interpolate",
     # SE(3)
     "se3_log",
     "se3_exp",
@@ -164,4 +208,4 @@ __all__ = [
     "xyz_rotation_6d_to_matrix",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

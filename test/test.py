@@ -62,8 +62,8 @@ from uni_transform import (
     # Interpolation
     quaternion_slerp,
     quaternion_nlerp,
-    transform_interpolate,
-    transform_sequence_interpolate,
+    interpolate_transform,
+    interpolate_transform_sequence,
     # SE(3) Lie group
     se3_log,
     se3_exp,
@@ -527,7 +527,7 @@ class TestInterpolation:
         norms = np.linalg.norm(result, axis=-1)
         np.testing.assert_allclose(norms, 1.0, rtol=1e-6)
 
-    def test_transform_interpolate_endpoints(self):
+    def test_interpolate_transform_endpoints(self):
         """Transform interpolation at t=0 and t=1 should return endpoints."""
         tf0 = Transform.identity(backend="numpy")
         tf1 = Transform.from_rep(
@@ -535,15 +535,15 @@ class TestInterpolation:
             from_rep="euler"
         )
         
-        result_0 = transform_interpolate(tf0, tf1, 0.0)
-        result_1 = transform_interpolate(tf0, tf1, 1.0)
+        result_0 = interpolate_transform(tf0, tf1, 0.0)
+        result_1 = interpolate_transform(tf0, tf1, 1.0)
         
         np.testing.assert_allclose(result_0.translation, tf0.translation, rtol=1e-6)
         np.testing.assert_allclose(result_0.rotation, tf0.rotation, rtol=1e-6)
         np.testing.assert_allclose(result_1.translation, tf1.translation, rtol=1e-6)
         np.testing.assert_allclose(result_1.rotation, tf1.rotation, rtol=1e-6)
 
-    def test_transform_interpolate_midpoint(self):
+    def test_interpolate_transform_midpoint(self):
         """Transform interpolation at t=0.5 should be midpoint."""
         tf0 = Transform.identity(backend="numpy")
         tf1 = Transform.from_rep(
@@ -551,12 +551,12 @@ class TestInterpolation:
             from_rep="euler"
         )
         
-        result = transform_interpolate(tf0, tf1, 0.5)
+        result = interpolate_transform(tf0, tf1, 0.5)
         
         # Translation should be midpoint
         np.testing.assert_allclose(result.translation, np.array([1.0, 0.0, 0.0]), rtol=1e-6)
 
-    def test_transform_sequence_interpolate(self):
+    def test_interpolate_transform_sequence(self):
         """Sequence interpolation should work correctly."""
         # Create batched keyframes
         keyframes = np.array([
@@ -569,7 +569,7 @@ class TestInterpolation:
         times = np.array([0.0, 1.0, 2.0])
         query_times = np.array([0.5, 1.5])
         
-        result = transform_sequence_interpolate(transforms, times, query_times)
+        result = interpolate_transform_sequence(transforms, times, query_times)
         
         assert result.translation.shape == (2, 3)
         np.testing.assert_allclose(result.translation[0], [0.5, 0, 0], rtol=1e-6)
@@ -1432,19 +1432,29 @@ class TestErrorHandling:
         with pytest.raises(ValueError, match="only supported for PyTorch"):
             rot.requires_grad_(True)
 
-    def test_to_on_numpy(self):
-        """Should raise error for to() on NumPy."""
+    def test_to_backend_conversion(self):
+        """Test to() supports backend conversion."""
         tf = Transform.identity(backend="numpy")
         
-        with pytest.raises(ValueError, match="only supported for PyTorch"):
-            tf.to(device="cpu")
+        # NumPy -> PyTorch
+        tf_torch = tf.to(backend="torch")
+        assert tf_torch.backend == "torch"
+        
+        # PyTorch -> NumPy
+        tf_np = tf_torch.to(backend="numpy")
+        assert tf_np.backend == "numpy"
 
-    def test_rotation_to_on_numpy(self):
-        """Should raise error for to() on NumPy Rotation."""
+    def test_rotation_to_backend_conversion(self):
+        """Test Rotation to() supports backend conversion."""
         rot = Rotation.identity(backend="numpy")
         
-        with pytest.raises(ValueError, match="only supported for PyTorch"):
-            rot.to(device="cpu")
+        # NumPy -> PyTorch
+        rot_torch = rot.to(backend="torch")
+        assert rot_torch.backend == "torch"
+        
+        # PyTorch -> NumPy
+        rot_np = rot_torch.to(backend="numpy")
+        assert rot_np.backend == "numpy"
 
     def test_xyz_rotation_6d_wrong_shape(self):
         """Should raise error for wrong xyz_rotation_6d shape."""

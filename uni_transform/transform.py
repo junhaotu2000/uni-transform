@@ -25,11 +25,16 @@ from ._core import (
     eye,
     get_backend,
     matmul,
+    to_backend,
     transpose_last_two,
     zeros,
 )
 from .rotation_conversions import (
+    matrix_to_euler,
+    matrix_to_quaternion,
     matrix_to_rotation,
+    matrix_to_rotation_6d,
+    matrix_to_rotvec,
     quaternion_to_matrix,
     rotation_to_matrix,
 )
@@ -69,32 +74,20 @@ class Transform:
         if isinstance(self.translation_unit, str):
             self.translation_unit = TranslationUnit(self.translation_unit)
 
-        rot_backend = get_backend(self.rotation)
-        trans_backend = get_backend(self.translation)
-        extra_backend = get_backend(self.extra) if self.extra is not None else None
+        # Detect backend from inputs (torch wins if any input is torch)
+        backends = [get_backend(self.rotation), get_backend(self.translation)]
+        if self.extra is not None:
+            backends.append(get_backend(self.extra))
+        self.backend = "torch" if "torch" in backends else "numpy"
 
-        is_torch = (
-            rot_backend == "torch"
-            or trans_backend == "torch"
-            or extra_backend == "torch"
-        )
-        self.backend = "torch" if is_torch else "numpy"
-
+        # Ensure all arrays are in the same backend
         if self.backend == "torch":
-            if not isinstance(self.rotation, torch.Tensor):
-                self.rotation = torch.as_tensor(self.rotation)
-            if not isinstance(self.translation, torch.Tensor):
-                self.translation = torch.as_tensor(
-                    self.translation,
-                    dtype=self.rotation.dtype,
-                    device=self.rotation.device,
-                )
-            if self.extra is not None and not isinstance(self.extra, torch.Tensor):
-                self.extra = torch.as_tensor(
-                    self.extra,
-                    dtype=self.rotation.dtype,
-                    device=self.rotation.device,
-                )
+            dtype = self.rotation.dtype if isinstance(self.rotation, torch.Tensor) else None
+            device = self.rotation.device if isinstance(self.rotation, torch.Tensor) else None
+            self.rotation = to_backend(self.rotation, "torch", dtype=dtype, device=device)
+            self.translation = to_backend(self.translation, "torch", dtype=dtype, device=device)
+            if self.extra is not None:
+                self.extra = to_backend(self.extra, "torch", dtype=dtype, device=device)
 
     # -------------------------------------------------------------------------
     # Factory Methods
@@ -327,6 +320,79 @@ class Transform:
 
         return result
 
+    def as_quat(self, include_extra: bool = True) -> ArrayLike:
+        """
+        Return pose as [translation, quaternion(xyzw), extra].
+
+        Args:
+            include_extra: If True and extra exists, append extra to output
+
+        Returns:
+            Array of shape (..., 7) or (..., 7+K) if extra exists
+        """
+        quat = matrix_to_quaternion(self.rotation)
+        result = cat([self.translation, quat], dim=-1)
+        if include_extra and self.extra is not None:
+            result = cat([result, self.extra], dim=-1)
+        return result
+
+    def as_euler(
+        self,
+        seq: str = "ZYX",
+        degrees: bool = False,
+        euler_in_rpy: bool = False,
+        include_extra: bool = True,
+    ) -> ArrayLike:
+        """
+        Return pose as [translation, euler_angles, extra].
+
+        Args:
+            seq: Euler sequence
+            degrees: If True, return angles in degrees
+            euler_in_rpy: If True, output is in [r,p,y] order
+            include_extra: If True and extra exists, append extra to output
+
+        Returns:
+            Array of shape (..., 6) or (..., 6+K) if extra exists
+        """
+        euler = matrix_to_euler(self.rotation, seq=seq, degrees=degrees, euler_in_rpy=euler_in_rpy)
+        result = cat([self.translation, euler], dim=-1)
+        if include_extra and self.extra is not None:
+            result = cat([result, self.extra], dim=-1)
+        return result
+
+    def as_rotvec(self, include_extra: bool = True) -> ArrayLike:
+        """
+        Return pose as [translation, rotation_vector, extra].
+
+        Args:
+            include_extra: If True and extra exists, append extra to output
+
+        Returns:
+            Array of shape (..., 6) or (..., 6+K) if extra exists
+        """
+        rotvec = matrix_to_rotvec(self.rotation)
+        result = cat([self.translation, rotvec], dim=-1)
+        if include_extra and self.extra is not None:
+            result = cat([result, self.extra], dim=-1)
+        return result
+
+    def as_rotation_6d(self, include_extra: bool = True) -> ArrayLike:
+        """
+        Return pose as [translation, 6D_rotation, extra].
+
+        Args:
+            include_extra: If True and extra exists, append extra to output
+
+        Returns:
+            Array of shape (..., 9) or (..., 9+K) if extra exists
+        """
+        rot_6d = matrix_to_rotation_6d(self.rotation)
+        result = cat([self.translation, rot_6d], dim=-1)
+        if include_extra and self.extra is not None:
+            result = cat([result, self.extra], dim=-1)
+        return result
+
     # -------------------------------------------------------------------------
     # Transform Operations
     # -------------------------------------------------------------------------
@@ -475,14 +541,29 @@ class Transform:
     # Utility Methods
     # -------------------------------------------------------------------------
 
-    def to(self, device=None, dtype=None) -> "Transform":
-        """Move transform to device/dtype (PyTorch only)."""
-        if self.backend != "torch":
-            raise ValueError("to() is only supported for PyTorch tensors")
+    def to(self, backend: Backend = None, device=None, dtype=None) -> "Transform":
+        """
+        Move transform to backend/device/dtype.
 
-        rot = self.rotation.to(device=device, dtype=dtype)
-        trans = self.translation.to(device=device, dtype=dtype)
-        extra = self.extra.to(device=device, dtype=dtype) if self.extra is not None else None
+        Args:
+            backend: Target backend ("numpy" or "torch"). If None, keeps current backend.
+            device: Target device (PyTorch only)
+            dtype: Target data type
+
+        Returns:
+            Transform in target backend/device/dtype
+        """
+        target_backend = backend or self.backend
+
+        if target_backend == "torch":
+            rot = to_backend(self.rotation, "torch", dtype=dtype, device=device)
+            trans = to_backend(self.translation, "torch", dtype=dtype, device=device)
+            extra = to_backend(self.extra, "torch", dtype=dtype, device=device) if self.extra is not None else None
+        else:
+            rot = to_backend(self.rotation, "numpy", dtype=dtype)
+            trans = to_backend(self.translation, "numpy", dtype=dtype)
+            extra = to_backend(self.extra, "numpy", dtype=dtype) if self.extra is not None else None
+
         return Transform(
             rotation=rot,
             translation=trans,

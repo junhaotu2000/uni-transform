@@ -93,7 +93,7 @@ tf.extra        # [0.04] - gripper width preserved
 euler_pose = tf.to_rep("euler")  # [x, y, z, r, p, y, gripper]
 
 # Extra is interpolated too
-tf_mid = transform_interpolate(tf_start, tf_end, t=0.5)
+tf_mid = interpolate_transform(tf_start, tf_end, t=0.5)
 tf_mid.extra  # Linearly interpolated gripper width
 ```
 
@@ -168,27 +168,47 @@ result = batch_tf @ batch_tf.inverse()  # Broadcasting supported
 ### Interpolation
 
 ```python
-from uni_transform import transform_interpolate, transform_sequence_interpolate, quaternion_slerp
+from uni_transform import (
+    interpolate, interpolate_sequence,
+    interpolate_transform, interpolate_transform_sequence,
+    compute_spline, quaternion_slerp
+)
 
-# Interpolate between two transforms (includes extra interpolation)
-tf_mid = transform_interpolate(tf_start, tf_end, t=0.5)
+# Vector interpolation
+pos = interpolate(start, end, t=0.5)  # Linear
+pos = interpolate(start, end, t=0.5, method="minimum_jerk", duration=2.0)  # Smooth
 
-# Interpolate between two rotations
+# Multi-point vector interpolation
+positions = interpolate_sequence(waypoints, times, query_times, method="cubic_spline")
+
+# Transform interpolation (rotation + translation)
+tf_mid = interpolate_transform(tf_start, tf_end, t=0.5)
+tf_mid = interpolate_transform(tf_start, tf_end, t=0.5,
+    rotation_method="nlerp",           # "slerp" or "nlerp"
+    translation_method="minimum_jerk", # "linear" or "minimum_jerk"
+    duration=2.0
+)
+
+# Multi-point transform interpolation
+keyframes = Transform.stack([tf0, tf1, tf2, tf3])
+times = np.array([0.0, 1.0, 2.0, 3.0])
+query_times = np.array([0.5, 1.5, 2.5])
+result = interpolate_transform_sequence(keyframes, times, query_times,
+    rotation_method="squad",           # "slerp", "nlerp", or "squad" (smooth)
+    translation_method="cubic_spline"  # "linear", "minimum_jerk", or "cubic_spline"
+)
+
+# Rotation interpolation (via class methods)
 rot_mid = rot_start.slerp(rot_end, t=0.5)  # Spherical interpolation
 rot_mid = rot_start.nlerp(rot_end, t=0.5)  # Faster, approximate
 
-# Quaternion SLERP (functional)
-q_mid = quaternion_slerp(q0, q1, t=0.5)
+# Reusable spline (compute once, evaluate many times)
+spline = compute_spline(waypoints, times)
+positions = spline.evaluate(query_times)
+velocities = spline.derivative(query_times, order=1)
 
-# Interpolate along a trajectory
-keyframes = Transform.from_rep(np.array([
-    [0, 0, 0, 0, 0, 0],
-    [1, 0, 0, 0, 0, 0.5],
-    [2, 0, 0, 0, 0, 1.0],
-]), from_rep="euler")
-times = np.array([0.0, 1.0, 2.0])
-query_times = np.array([0.5, 1.5])
-interpolated = transform_sequence_interpolate(keyframes, times, query_times)
+# Low-level quaternion SLERP
+q_mid = quaternion_slerp(q0, q1, t=0.5)
 ```
 
 ### Relative Transforms & Deltas
@@ -324,9 +344,16 @@ geodesic_distance, translation_distance, transform_distance
 # SE(3) Lie group
 se3_log, se3_exp
 
-# Interpolation
-transform_interpolate, transform_sequence_interpolate
-quaternion_slerp, quaternion_nlerp
+# Interpolation (unified API)
+interpolate, interpolate_sequence                    # Vector/scalar
+interpolate_rotation, interpolate_rotation_sequence # Rotation
+interpolate_transform, interpolate_transform_sequence # Transform
+compute_spline, SplineCoefficients                   # Reusable spline
+
+# Interpolation (low-level)
+quaternion_slerp, quaternion_nlerp, quaternion_squad
+minimum_jerk_interpolate, minimum_jerk_velocity
+cubic_spline_interpolate, cubic_spline_derivative
 
 # Utilities
 orthogonalize_rotation, xyz_rotation_6d_to_matrix
@@ -338,7 +365,7 @@ orthogonalize_rotation, xyz_rotation_6d_to_matrix
 - **Euler default**: `ZYX` sequence (yaw-pitch-roll)
 - **Composition**: `tf1 @ tf2` applies `tf2` first, then `tf1`
 - **Translation unit**: Default is meters (`"m"`), also supports millimeters (`"mm"`)
-- **Extra**: Preserved through `inverse()`, `clone()`, `to_unit()`; interpolated in `transform_interpolate()`
+- **Extra**: Preserved through `inverse()`, `clone()`, `to_unit()`; interpolated in `interpolate_transform()`
 
 ## Module Structure
 
