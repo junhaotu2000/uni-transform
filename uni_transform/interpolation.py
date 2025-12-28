@@ -15,7 +15,6 @@ Low-level functions also available:
     - quaternion_slerp, quaternion_nlerp, quaternion_squad
     - minimum_jerk_interpolate, minimum_jerk_velocity, minimum_jerk_acceleration
     - compute_spline, cubic_spline_interpolate, cubic_spline_derivative
-    - transform_interpolate, transform_sequence_interpolate
 """
 
 from __future__ import annotations

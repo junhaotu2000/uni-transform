@@ -194,9 +194,8 @@ __all__ = [
     "cubic_spline_interpolate",
     "cubic_spline_derivative",
     # Interpolation - Transform
-    "transform_interpolate",
-    "transform_sequence_interpolate",
-    "transform_minimum_jerk_interpolate",
+    "interpolate_transform",
+    "interpolate_transform_sequence",
     # SE(3)
     "se3_log",
     "se3_exp",
