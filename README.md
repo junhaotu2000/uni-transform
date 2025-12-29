@@ -12,6 +12,7 @@ A Python library for 3D rigid body transformations with **NumPy** and **PyTorch*
 - **Dual Backend** - Seamless NumPy ↔ PyTorch switching
 - **Extra State** - Store gripper width, joint states alongside poses
 - **Unit Support** - Explicit translation units (meters/millimeters)
+- **Visualization** - 3D visualization with [Rerun](https://rerun.io/) (optional)
 
 ## Installation
 
@@ -227,6 +228,22 @@ rot_new = rot.apply_delta(delta_rot, in_body_frame=False)  # World frame
 rot_new = rot.apply_delta(delta_rot, in_body_frame=True)   # Body frame
 ```
 
+### Visualization (Rerun)
+
+Visualize transforms, trajectories, and point clouds with [Rerun](https://rerun.io/). Requires `pip install rerun-sdk`.
+
+```python
+from uni_transform import Transform
+from uni_transform.visualization import RerunVisualizer, log_transform, log_trajectory
+
+# High-level API
+viz = RerunVisualizer("my_app", spawn=True)  # spawn=True for GUI
+viz.show_transform("robot/base", base_tf)
+viz.show_trajectory("robot/path", trajectory)
+viz.show_points("scene/cloud", points)
+
+```
+
 ## Rotation Representations
 
 | Name | Shape | Description |
@@ -330,8 +347,9 @@ rot.detach()                      # Detach from graph (PyTorch)
 ```python
 # Conversions
 quaternion_to_matrix, matrix_to_quaternion
-euler_to_matrix, matrix_to_euler
+euler_to_matrix, matrix_to_euler, matrix_to_euler_differentiable
 rotvec_to_matrix, matrix_to_rotvec
+quaternion_to_rotvec, rotvec_to_quaternion
 rotation_6d_to_matrix, matrix_to_rotation_6d
 convert_rotation, rotation_to_matrix, matrix_to_rotation
 
@@ -352,11 +370,22 @@ compute_spline, SplineCoefficients                   # Reusable spline
 
 # Interpolation (low-level)
 quaternion_slerp, quaternion_nlerp, quaternion_squad
-minimum_jerk_interpolate, minimum_jerk_velocity
-cubic_spline_interpolate, cubic_spline_derivative
+minimum_jerk_interpolate, minimum_jerk_velocity, minimum_jerk_acceleration
+cubic_spline_coefficients, cubic_spline_interpolate, cubic_spline_derivative
 
 # Utilities
 orthogonalize_rotation, xyz_rotation_6d_to_matrix
+
+# Visualization (requires rerun-sdk)
+from uni_transform.visualization import (
+    init, connect, save,                    # Setup
+    log_transform, log_trajectory,          # Core logging
+    log_trajectory_animated,                # Animation
+    log_transform_manager,                  # TransformManager graph
+    log_points, log_text, log_scalar,       # Primitives
+    set_time,                               # Timeline control
+    RerunVisualizer,                        # High-level API
+)
 ```
 
 ## Conventions
@@ -378,7 +407,8 @@ uni_transform/
 ├── transform.py             # Transform class
 ├── interpolation.py         # Interpolation functions
 ├── se3.py                   # SE(3) Lie group operations
-└── metrics.py               # Distance functions
+├── metrics.py               # Distance functions
+└── visualization.py         # Rerun visualization (optional)
 ```
 
 ## License
