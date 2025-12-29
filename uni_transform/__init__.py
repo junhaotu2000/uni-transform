@@ -131,6 +131,14 @@ from .metrics import (
     transform_distance,
 )
 
+# Visualization (optional, requires rerun-sdk)
+# Import as: from uni_transform import visualization
+# Or: from uni_transform.visualization import RerunVisualizer
+try:
+    from . import visualization
+except ImportError:
+    visualization = None  # rerun-sdk not installed
+
 __all__ = [
     # Types
     "ArrayLike",
