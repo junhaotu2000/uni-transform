@@ -96,6 +96,7 @@ from .rotation_conversions import (
 # Classes
 from .rotation import Rotation
 from .transform import Transform
+from .transform_manager import TransformManager
 
 # Interpolation
 from .interpolation import (
@@ -154,6 +155,7 @@ __all__ = [
     # Classes
     "Rotation",
     "Transform",
+    "TransformManager",
     "UnitMismatchError",
     # Interpolation - Unified API
     "interpolate",
